@@ -1,0 +1,75 @@
+---
+title: "The energy model"
+description: "The propagation budget — how far a memory diff can travel, and why high-value knowledge travels farther than routine work."
+---
+
+Every memory diff carries an energy budget. That budget is the single dial that decides how far the diff spreads across the mesh during [gossip propagation](/concepts/gossip-propagation): the diff forwards to a neighbour only while it can still afford the hop, and every hop spends energy. This page gives you the exact formulas and the intuition behind them.
+
+## Initial energy
+
+When a diff is created, its starting energy is:
+
+```text
+E0 = base_energy × √salience × type_multiplier
+```
+
+- `base_energy` is the global baseline (default `10.0`).
+- `salience` is how important the diff is, in `[0, 1]`. The square root softens the effect, so a very low-salience diff still gets a meaningful budget rather than collapsing to zero.
+- `type_multiplier` depends on the cell type (see the table below). An unknown or unrecognised cell type uses a multiplier of `1.0`.
+
+<Note>
+A contradiction diff is special: its initial energy is multiplied by `contradiction_bonus = 1.5`. Conflicting information is given extra reach so it can catch up with whatever it contradicts.
+</Note>
+
+## Hop cost
+
+Each hop spends energy based on the strength of the edge being crossed:
+
+```text
+hop_cost = 1.0 / max(edge.weight, 0.01)
+```
+
+Stronger edges (higher `weight`) are cheaper to cross, so diffs naturally flow along the well-connected paths of the mesh. The edge weight is floored at `0.01` so that a near-zero weight cannot produce an infinite or undefined cost.
+
+A diff keeps forwarding across an edge only while `diff.energy >= hop_cost`. Once it can no longer afford any remaining edge, it stops.
+
+## Cell-type multipliers
+
+The cell type sets how much initial energy a diff starts with — which is what makes some kinds of knowledge travel across the whole mesh while others stay local.
+
+| Cell type   | Multiplier |
+| ----------- | ---------- |
+| Decision    | 2.0        |
+| Constraint  | 2.0        |
+| Risk        | 1.5        |
+| Pattern     | 1.5        |
+| Lesson      | 1.2        |
+| Fact        | 1.0        |
+| Preference  | 0.8        |
+| Context     | 0.5        |
+| Task        | 0.3        |
+
+The intuition is deliberate. Decisions and constraints shape everyone's work, so they start with the most energy and reach the farthest. A task is local and short-lived, so it starts with little energy and stays near its origin. Facts sit in the middle at the neutral `1.0` baseline.
+
+<Warning>
+These multipliers are **calibrated values**, not arbitrary defaults. Changing them changes how far each kind of knowledge propagates across the mesh. Treat them as a tuned part of the system's behaviour, not a casual configuration knob.
+</Warning>
+
+## Worked intuition
+
+Consider two diffs stored with the same salience across the same neighbourhood:
+
+- A **Decision** starts at `10.0 × √salience × 2.0` — a large budget. It can afford many hops and fans out across the mesh.
+- A **Task** starts at `10.0 × √salience × 0.3` — a small budget. It pays for a hop or two and then stops, staying close to where it was created.
+
+That single difference in starting energy is why "decisions travel furthest" while routine tasks stay local — without any explicit routing rules.
+
+## How this connects to the rest of the system
+
+Energy is the budget that bounds the [gossip propagation](/concepts/gossip-propagation) walk. [Trust](/concepts/trust-and-provenance) can reduce it further: with `trust.energy_attenuation` enabled (default `false` — a stock deployment does not attenuate), a low-trust source's effective energy is scaled down by its trust score. And [layer promotion](/concepts/layer-promotion) adds a fixed energy bonus when a diff graduates, giving the promoted diff fresh reach.
+
+## Source
+
+This page is a teaching restatement of the HyphaeDB specifications. It does not define new behaviour.
+
+- [hyphae-gossip spec §4 (FR-1), §6, §8](https://github.com/hyphae-db/hyphae-core/blob/main/specs/hyphae-gossip.md) — initial-energy and hop-cost formulas, cell-type multipliers, the contradiction bonus, and configuration defaults.

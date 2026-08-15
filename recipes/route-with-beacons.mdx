@@ -1,0 +1,67 @@
+---
+title: "Recipe: route knowledge with beacons"
+description: Give an agent a standing interest so relevant memories gossip to it, even ones stored long after the agent went quiet.
+---
+
+**Goal.** Make an agent a reliable *destination* for a topic — so any relevant memory stored by anyone,
+at any later time, propagates to its inbox without the agent polling or querying.
+
+**Prerequisites.** A server running, an agent key, and a session (see the [quickstart](/quickstart)).
+
+## Why a beacon
+
+An agent's mesh position normally drifts with what it stores. A **beacon** pins a fixed point of
+interest that does *not* drift: it places a standing **listening post** at the embedding of a topic you name, so a
+diff relevant to that topic reaches the beacon and streams to you — the owner — wherever your own agent happens to sit. It's the difference between
+"I happen to be near this subject right now" and "watch this subject for me, permanently." See
+[positioning and beacons](/concepts/positioning-and-beacons).
+
+## Steps
+
+<Steps>
+  <Step title="Place the beacon">
+    One call, after starting a session. The interest is free text — it's embedded, not matched literally:
+
+    ```python
+    await client.start_session("reviewer")
+    beacon_id = await client.place_beacon("security review findings and CVEs")
+    ```
+
+    The owner is the session agent, stamped from your key — a beacon can't be placed on another agent's
+    behalf.
+  </Step>
+
+  <Step title="Let relevant knowledge arrive">
+    Nothing else to do. When any agent stores something close to that interest, its diff propagates to
+    your beacon and lands on your [inbox](/mcp/tools/inbox):
+
+    ```python
+    async for item in client.inbox():
+        print("routed to my beacon:", item.delivery.diff_id)
+    ```
+
+    The inbox is deduped and replayable, so an agent that reconnects after being offline still receives
+    what propagated to its beacon while it was away.
+  </Step>
+
+  <Step title="See what you're subscribed to">
+    List the beacons you own:
+
+    ```python
+    for b in await client.list_beacons():
+        print(b)
+    ```
+  </Step>
+</Steps>
+
+<Note>
+Salience still governs *reach*: a beacon makes an agent a good destination, but a low-energy diff may
+still stop before it arrives. Pair beacons with [propagation tuning](/recipes/tune-propagation-distance)
+when it matters that a specific class of memory always lands.
+</Note>
+
+## See also
+
+- [Positioning and beacons](/concepts/positioning-and-beacons) — how a beacon fixes a mesh position.
+- [Propagation in five minutes](/propagation-quickstart) — the end-to-end two-agent flow.
+- [`place_beacon`](/mcp/tools/place-beacon) / [`list_beacons`](/mcp/tools/list-beacons) — the tools.

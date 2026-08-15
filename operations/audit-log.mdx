@@ -1,0 +1,178 @@
+---
+title: Audit log & security events
+description: HyphaeDB's tamper-evident, hash-chained audit log — what it records, the action taxonomy, the synchronous fail-closed contract, and the one bounded metric it contributes.
+---
+
+<Note>
+**Status: built (V1).** Every security-relevant action is written to an append-only, hash-chained
+`audit_log` table by a single serialized writer, and all twenty-three `AuditAction` variants have a
+production emit site — authentication, authorization denials, the identity lifecycle, agent
+descriptors, mesh trust changes, the admin data-lifecycle operations, A2A push-notification
+configs, and the plugin framework's boot record. Security-state changes are recorded
+**synchronously and fail-closed**; hot-path data operations are best-effort buffered. **Deferred:**
+true per-tenant gap-free `seq` under multiple tenants (V1 is single-tenant with a global sequence;
+DEF-0031), the database-level append-only `GRANT` (INSERT-only is enforced by the writer, not yet
+by the role; DEF-0032), external chain-head anchoring (DEF-0033), and transactional atomicity
+between a domain write and its audit row.
+</Note>
+
+Metrics answer *how many* auth failures happened; they can never answer *which agent, from where, at
+what time* — that per-actor detail is exactly what [observability](/operations/observability) keeps
+**off** metric labels to bound cardinality. The audit log is where that detail lives: an append-only
+record of every security-relevant action, chained so that any tampering is detectable after the fact.
+
+The `audit_log` table is the system of record. Each event is also mirrored as a `tracing` event at
+`target = "audit"`, so the same data flows to your log aggregation pipeline — but the row, not the log
+line, is authoritative.
+
+## What each record carries
+
+Every row is one `AuditEvent`:
+
+| Field | Meaning |
+|-------|---------|
+| `seq` | Monotonic, gap-free position in the tenant chain, assigned by the single writer (a `bigint` primary key — **not** `bigserial`, because `seq` is part of the hash preimage and must be known before insert). |
+| `ts` | When the audited action occurred. |
+| `tenant_id` | The tenant whose chain the row belongs to (always set; one chain per tenant). |
+| `actor` | The authenticated principal the action is attributed to. |
+| `action` | The `AuditAction` variant (see below). |
+| `outcome` | `Allowed`, `Denied`, or `Error`. |
+| `target` | The resource the action touched (node / scene / agent id as a string), when applicable. |
+| `detail` | Structured, non-secret context (reason, scope, trust delta) — **never** a credential, key, or token. |
+| `prev_hash` | The hash of the `seq − 1` row (all-zero for a chain's genesis row). |
+| `hash` | `BLAKE3(canonical_fields ‖ prev_hash)` — the link the next row chains onto. |
+
+## The action taxonomy
+
+The `AuditAction` enum is a **bounded** set — bounded so it can safely be a metric label. Grouped by
+the area that emits it:
+
+| Area | Actions | Recording |
+|------|---------|-----------|
+| **Authentication** | `AuthSuccess`, `AuthFailure` | success buffered, failure synchronous |
+| **Authorization** | `AuthzDenied` | synchronous |
+| **Identity lifecycle** | `AgentRegister`, `AgentRevoke`, `CredentialRotate`, `AgentSuspend`, `AgentReinstate` | synchronous |
+| **Mesh trust** | `TrustChange` | synchronous |
+| **Data plane (hot path)** | `Store`, `Recall`, `Query`, `InboxDelivery`, `BeaconPlace`, `Consolidate` | buffered |
+| **Data lifecycle / admin** | `Erase`, `NodeDelete`, `Reembed` | synchronous |
+| **Agent descriptors** | `DescriptorSet`, `DescriptorImport` | synchronous |
+| **A2A push configs** | `PushConfigSet`, `PushConfigDelete` | synchronous |
+| **Extensibility** | `PluginSelected` | synchronous (once, at boot) |
+
+The identity, data-lifecycle, and descriptor actions are emitted by the
+[admin control plane](/operations/admin-control-plane) and the identity registry; the data-plane
+actions come from the memory-service facade; the push-config actions come from the
+[A2A gateway](/a2a/tasks-and-streaming)'s config CRUD; `PluginSelected` is emitted once at the end
+of boot resolution as a durable record of the active extension-point → plugin set; and
+`TrustChange` comes from the mesh crate through a dependency-cycle-free emit seam (below).
+
+## Tamper-evidence: the hash chain
+
+Structured logs answer "what happened" but not "has this history been edited". A hash chain makes the
+trail tamper-*evident*: `hash_n = BLAKE3(canonical(event_n) ‖ hash_{n-1})`, so removing, reordering, or
+editing any row breaks every subsequent hash. The canonical encoding length-prefixes each field and
+sorts JSON keys, so the hash is stable regardless of map ordering.
+
+`verify_chain(tenant, from_seq, to_seq)` recomputes each row's hash from its fields plus the prior
+hash and returns a `ChainVerification { ok, checked, first_broken_seq }`. A break is a **finding**, not
+an error — the caller gets `ok = false` and the exact `seq` where the chain first failed:
+
+- An **edited** field → that row's recomputed hash no longer matches.
+- A **deleted** row → the next row's `prev_hash` and the `seq` contiguity both fail.
+- An **inserted** or **reordered** row → contiguity and the following `prev_hash` fail.
+
+The table is written by `INSERT` only. Retention is the single sanctioned deletion, and it is a
+**head-truncation**, never an interior edit: the [data-lifecycle](/operations/data-lifecycle) GC worker
+removes the contiguous oldest rows and records an `AuditCheckpoint` — the surviving genesis row's
+unchanged `prev_hash`, sealed so that `verify_chain` over the remaining range seeds from the checkpoint
+and stays valid. Surviving rows are never rewritten.
+
+## Synchronous vs. buffered: the fail-closed contract
+
+Whether an action is recorded synchronously is fixed by the action, not by config — an operator cannot
+accidentally make a security-state event best-effort.
+
+- **Security-state actions** (`AuthFailure`, `AuthzDenied`, all five identity events, `TrustChange`,
+  `Erase`, `NodeDelete`, `Reembed`, `DescriptorSet`, `DescriptorImport`, `PushConfigSet`,
+  `PushConfigDelete`, `PluginSelected`) are recorded **synchronously**. The contract has two shapes:
+  - *State mutations* (register / revoke / rotate / suspend / reinstate / trust change / node delete /
+    reembed / erase / descriptor set / descriptor import / push-config set / push-config delete / the
+    boot plugin record): a failed audit write **fails the operation** — it is not reported complete
+    unless its row is durable. Stored push configs are future egress destinations and a descriptor
+    import binds an external document to an identity, which is why both families fail closed.
+  - *Denials and failures* (`AuthFailure`, `AuthzDenied`): the operation already failed, so a failed
+    audit write does **not** change the returned error — the caller stays denied — but the write is
+    still awaited and surfaced (a `tracing` warning plus `hyphae.audit.write.errors.total`); it is never
+    silently dropped.
+- **Hot-path data actions** (`Store`, `Recall`, `Query`, `InboxDelivery`, `BeaconPlace`, `Consolidate`,
+  plus `AuthSuccess`) are **best-effort buffered**: enqueued to an in-process channel and batch-written.
+  On overflow they are dropped and counted, never blocking the request.
+
+### Denials are always audited
+
+The memory-service facade routes every [authorization](/operations/authorization) denial through a
+single `deny_audit` path: a `Forbidden` emits an `AuthzDenied` / `Denied` row before the error
+propagates, and any other failure is recorded with `outcome = Error`. No denial leaves the facade
+unaudited.
+
+This composes with the **anti-oracle** ownership pattern. An operation against a resource the caller
+does not own — including a cross-tenant target — resolves to an *absent-equivalent* idempotent no-op
+rather than a distinguishable "forbidden" error, so neither the response nor the audit row becomes a
+cross-tenant existence oracle. An explicit authorization denial, by contrast, is recorded as
+`AuthzDenied` because the caller was entitled to reach the check and was refused.
+
+## The cross-crate emit seam
+
+The mesh crate (`hyphae-mesh`) cannot depend on the server's `AuditSink` without a dependency cycle, so
+`TrustChange` is emitted through a narrow `AuditEmitter` trait defined in `hyphae-core` (a no-op
+`NoopAuditSink` is the default for tests and unwired paths). The one `PgAuditSink` implements both
+`AuditSink` and `AuditEmitter`, so the same serialized writer and the same chain serve every layer —
+the mesh audits through the seam, and no crate takes a dependency on `hyphae-server`.
+
+## Metrics
+
+The audit log contributes exactly **one** per-event metric, plus three unlabelled health counters:
+
+| Metric | Labels | Meaning |
+|--------|--------|---------|
+| `hyphae.audit.events.total` | `action`, `outcome` | One increment per recorded event; both labels are bounded enums. |
+| `hyphae.audit.write.errors.total` | — | A durable append failed, so a failing writer is itself visible. |
+| `hyphae.audit.dropped.total` | — | A best-effort buffered event was dropped on buffer overflow. |
+| `hyphae.audit.retention.trimmed.total` | — | Rows head-truncated by the retention GC pass. |
+
+Per the [observability](/operations/observability) cardinality rule, `agent_id`, `target`, and
+`tenant_id` are **never** metric labels — they live only in the audit row and on the `tracing` event
+attributes. An `audit` health probe reports `Down` (and flips `/readyz` to 503) if the writer task dies
+or its backlog exceeds the alarm threshold, so a dead audit writer is a readiness failure.
+
+## Configuration
+
+Two [configuration](/operations/configuration) fields govern the log:
+
+| Setting | Default | Effect |
+|---------|---------|--------|
+| `audit.enabled` | `true` | Gates the sink. When `false`, a no-op sink is wired (recording nothing) — an honest opt-out, not a silently-ignored flag. **Rejected at boot** in `DeploymentProfile::Production`: security auditing may not be off in production. |
+| `audit.retention_days` | `365` | Rows older than `now − retention_days` are head-truncated each GC pass. `0` disables the trim. |
+
+## What is deferred
+
+- **Multi-tenant gap-free `seq`.** V1 mints all principals into a single default tenant and uses a
+  global monotonic `seq`. True per-tenant chains under multiple tenants need a composite `(tenant_id,
+  seq)` key and a per-tenant counter; the per-tenant `last_hash` and verification seeding are already
+  structured for it.
+- **Database-level append-only enforcement.** The writer is `INSERT`-only by construction, but the
+  `GRANT`/trigger that would deny `UPDATE`/`DELETE` at the database role level is convention-only in V1.
+- **External chain-head anchoring.** Publishing the periodic chain head to an external append-only store
+  — so even a full-database rewrite is detectable — is deferred; the sealed checkpoint is the hook.
+- **Transactional atomicity.** A state-mutation domain write and its audit row are separate storage
+  calls, not one transaction, so a writer-down window can leave a durable mutation un-audited (surfaced
+  on `hyphae.audit.write.errors.total`, never silent). Transactional write-plus-audit is a V2 hardening.
+- **Crash loss of buffered events.** Best-effort hot-path events can be lost on an ungraceful exit by
+  design; security-state events stay synchronous and durable before their operation returns.
+
+## Source
+
+This page is a teaching restatement of the
+[audit-logging spec](https://github.com/hyphae-db/hyphae-core/blob/main/specs/audit-logging.md) and the
+[security-event-completeness spec](https://github.com/hyphae-db/hyphae-core/blob/main/specs/security-event-completeness.md);
+those specs are authoritative for any detail here.

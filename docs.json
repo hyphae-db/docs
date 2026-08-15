@@ -1,0 +1,166 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "name": "HyphaeDB",
+  "theme": "mint",
+  "colors": {
+    "primary": "#1f6f54",
+    "light": "#5fd6a3",
+    "dark": "#2e9e6e"
+  },
+  "logo": {
+    "light": "/logo/light.svg",
+    "dark": "/logo/dark.svg"
+  },
+  "favicon": "/favicon.svg",
+  "navigation": {
+    "versions": [
+      {
+        "version": "v1",
+        "tabs": [
+          {
+            "tab": "Guides",
+            "groups": [
+              {
+                "group": "Get started",
+                "pages": ["introduction", "quickstart", "propagation-quickstart"]
+              },
+              {
+                "group": "Concepts",
+                "pages": [
+                  "concepts/gossip-propagation",
+                  "concepts/energy-model",
+                  "concepts/hnsw-mesh",
+                  "concepts/positioning-and-beacons",
+                  "concepts/layer-promotion",
+                  "concepts/contradiction-detection",
+                  "concepts/trust-and-provenance"
+                ]
+              },
+              {
+                "group": "Operations",
+                "pages": [
+                  "operations/docker-compose",
+                  "operations/configuration",
+                  "operations/deployment",
+                  "operations/deployment-operations",
+                  "operations/durability-and-dr",
+                  "operations/high-availability",
+                  "operations/authorization",
+                  "operations/audit-log",
+                  "operations/admin-control-plane",
+                  "operations/data-lifecycle",
+                  "operations/observability",
+                  "operations/topology-observatory",
+                  "operations/api-versioning"
+                ]
+              },
+              {
+                "group": "Extend",
+                "pages": ["extending"]
+              }
+            ]
+          },
+          {
+            "tab": "Recipes",
+            "groups": [
+              {
+                "group": "Recipes",
+                "pages": [
+                  "recipes/overview",
+                  "recipes/mcp-claude-code",
+                  "recipes/route-with-beacons",
+                  "recipes/tune-propagation-distance",
+                  "recipes/watch-propagation",
+                  "recipes/erase-with-certificate"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "SDKs",
+            "groups": [
+              {
+                "group": "Client libraries",
+                "pages": [
+                  "sdks/python",
+                  "sdks/typescript",
+                  "sdks/go",
+                  "sdks/rust"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "API Reference",
+            "groups": [
+              {
+                "group": "Overview",
+                "pages": ["api-reference/overview"]
+              },
+              {
+                "group": "REST",
+                "openapi": "api-reference/openapi.json"
+              }
+            ]
+          },
+          {
+            "tab": "MCP Tools",
+            "groups": [
+              {
+                "group": "Overview",
+                "pages": ["mcp/overview", "mcp/acp-clients"]
+              },
+              {
+                "group": "Tools",
+                "pages": [
+                  "mcp/tools/store",
+                  "mcp/tools/recall",
+                  "mcp/tools/start-session",
+                  "mcp/tools/end-session",
+                  "mcp/tools/place-beacon",
+                  "mcp/tools/list-beacons",
+                  "mcp/tools/inbox",
+                  "mcp/tools/query",
+                  "mcp/tools/get-scene",
+                  "mcp/tools/list-scenes",
+                  "mcp/tools/pull-inbox"
+                ]
+              }
+            ]
+          },
+          {
+            "tab": "gRPC",
+            "groups": [
+              {
+                "group": "gRPC",
+                "pages": ["grpc/overview"]
+              }
+            ]
+          },
+          {
+            "tab": "A2A",
+            "groups": [
+              {
+                "group": "A2A",
+                "pages": ["a2a/overview", "a2a/memory-skills", "a2a/tasks-and-streaming"]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "GitHub",
+        "href": "https://github.com/hyphae-db/hyphae-core"
+      }
+    ]
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/hyphae-db/hyphae-core"
+    }
+  }
+}

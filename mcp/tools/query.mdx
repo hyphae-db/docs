@@ -1,0 +1,93 @@
+---
+title: "query"
+description: "Layered vector query over MCP against an explicit semantic layer (L0/L1/L2); returns scored node ids."
+---
+
+Run a vector query against an explicit semantic layer. Like [recall](/mcp/tools/recall), but you choose the layer instead of defaulting to L0. The server embeds the query text and returns scored node ids, nearest first.
+
+Dispatches to the `query` internal service method.
+
+## recall versus query
+
+[recall](/mcp/tools/recall) always searches layer L0 — the raw cells you stored. `query` lets you target a specific layer:
+
+- `L0` — raw stored cells.
+- `L1` and `L2` — consolidated, promoted knowledge.
+
+Higher layers hold fewer, more durable nodes that the system promotes from L0 over time. Use `query` with `L1` or `L2` when you want consolidated knowledge rather than every raw cell. See [The HNSW mesh](/concepts/hnsw-mesh) and [Layer promotion](/concepts/layer-promotion).
+
+## Parameters
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `text` | string | Yes | — | The query text, embedded server-side. |
+| `layer` | string | Yes | — | The semantic layer to search. One of `L0`, `L1`, `L2`. |
+| `k` | integer | No | `10` | Number of neighbours to return (minimum `1`). |
+| `filter` | object | No | — | A convenience `NodeFilter`, AND-ed after the caller's access scope. |
+
+## Returns
+
+```json
+{
+  "nodes": [
+    { "node_id": "<uuid>", "distance": <number> }
+  ]
+}
+```
+
+Returned as the `structuredContent` payload, nearest first.
+
+<Note>
+Over MCP, `query` returns only `{node_id, distance}` pairs — not hydrated cell content. To read a cell's content, use a hydrating surface such as the [REST API](/api-reference/overview), which returns full nodes.
+</Note>
+
+## Example
+
+Request:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "query",
+    "arguments": { "text": "storage architecture decisions", "layer": "L1", "k": 5 }
+  }
+}
+```
+
+Response:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": [
+      { "type": "text", "text": "{\"nodes\":[{\"node_id\":\"6f9619ff-8b86-d011-b42d-00cf4fc964ff\",\"distance\":0.08}]}" }
+    ],
+    "structuredContent": {
+      "nodes": [
+        { "node_id": "6f9619ff-8b86-d011-b42d-00cf4fc964ff", "distance": 0.08 }
+      ]
+    },
+    "isError": false
+  }
+}
+```
+
+## Annotations
+
+The tool's MCP behaviour hints, as emitted in `tools/list` (advisory display metadata — see [the annotations contract](/mcp/overview#tool-annotations)):
+
+| `readOnlyHint` | `destructiveHint` | `idempotentHint` | `openWorldHint` |
+|---|---|---|---|
+| `true` | `false` | `true` | `false` |
+
+A pure read against the chosen layer — writes nothing.
+
+## Related
+
+- [recall](/mcp/tools/recall) for the L0 shortcut.
+- [Layer promotion](/concepts/layer-promotion) for how L1/L2 are built.

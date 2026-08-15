@@ -1,0 +1,68 @@
+---
+title: "end_session"
+description: "Close an agent session by id over MCP."
+---
+
+Close an agent session by id. Call this with the `session_id` returned by [start_session](/mcp/tools/start-session).
+
+Dispatches to the `end_session` internal service method.
+
+## Parameters
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `session_id` | string | Yes | — | The session UUID to close. |
+
+## Returns
+
+```json
+{ "ok": true }
+```
+
+Returned as the `structuredContent` payload.
+
+## Example
+
+Request:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "end_session",
+    "arguments": { "session_id": "3f2504e0-4f89-11d3-9a0c-0305e82c3301" }
+  }
+}
+```
+
+Response:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": [
+      { "type": "text", "text": "{\"ok\":true}" }
+    ],
+    "structuredContent": { "ok": true },
+    "isError": false
+  }
+}
+```
+
+## Annotations
+
+The tool's MCP behaviour hints, as emitted in `tools/list` (advisory display metadata — see [the annotations contract](/mcp/overview#tool-annotations)):
+
+| `readOnlyHint` | `destructiveHint` | `idempotentHint` | `openWorldHint` |
+|---|---|---|---|
+| `false` | `false` | `true` | `false` |
+
+Closes existing state exactly once: the second call is a guarded no-op (idempotent), and nothing is deleted — the session row and every provenance link to it survive, so it is not destructive.
+
+## Related
+
+- [start_session](/mcp/tools/start-session) to open a session.

@@ -1,0 +1,108 @@
+---
+title: Durability and disaster recovery
+description: How HyphaeDB backs up each tier, snapshots the in-memory mesh, and rehydrates within a bounded budget — keeping PostgreSQL as the single source of truth.
+---
+
+HyphaeDB splits its state across a durable system of record (PostgreSQL) and a large, fast,
+**non-durable** in-memory HNSW mesh that is rebuilt on every boot. Durability and disaster recovery
+close three gaps: backing up each tier, snapshotting the mesh so restarts are fast, and giving
+rehydration a defined availability story.
+
+The unifying principle: **the snapshot is never authoritative — PostgreSQL is.** A snapshot is a
+fast-start cache that is always reconciled against newer rows in the system of record. A stale or
+corrupt snapshot can only slow a boot; it can never produce a graph that disagrees with PostgreSQL.
+
+## Backup and restore per tier
+
+| Tier | Backup | Restore |
+|------|--------|---------|
+| PostgreSQL (system of record) | A `pg_dump` baseline plus point-in-time recovery (PITR) via WAL archiving. | Restore the baseline, then replay archived WAL to a target time or LSN within the retention window. |
+| `model-cache` volume | Periodic volume snapshots of the embedding model cache. | Re-attach the snapshot, or re-download the weights on a cold restore. |
+| In-memory mesh | Not backed up directly — it is reconstructable. Its fast-start cache is the `HnswSnapshot`. | Rebuilt from the snapshot plus the post-watermark delta from PostgreSQL. |
+
+## The HNSW snapshot
+
+A snapshot is the serialized image of the live mesh plus a watermark that pins it to a point in the
+system of record. It carries the **full edge telemetry** (weight, bandwidth, last-gossip time, and
+forwarded-diff counts) that a topology-only rebuild would drop, so a restore preserves gossip
+rate-limiting state instead of restarting it cold.
+
+Snapshots are **enabled by setting `HYPHAEDB_SNAPSHOT_DIR`** (the compose stack points it at a
+dedicated `snapshot-cache` volume); with it unset the feature is off and every boot does the full
+rehydration — slower, never lossy. When enabled, snapshots are written on graceful shutdown and on
+a background checkpoint (every 15 minutes by default), keeping a few generations. Every frame is
+individually checksummed and the file is written atomically (temp file, fsync, then rename) so a
+crash mid-write never leaves a torn snapshot in place.
+
+The snapshot watermark records the source-of-record position the image reflects — deliberately a
+few seconds conservative, so a row committing to PostgreSQL concurrently with the checkpoint can
+never fall between the snapshot and the delta. On load, the server replays the rows at or after
+that watermark; replaying a row the snapshot already contains is an idempotent skip, so the
+conservative cut costs a few duplicate skips, never correctness.
+
+## Bounded rehydration
+
+On boot the server rehydrates the mesh under a budget (120 seconds by default):
+
+<Steps>
+  <Step title="Load the latest valid snapshot">
+    Validate the header (magic, format version, and the embedding model and dimensions), then verify
+    every frame's checksum. A model mismatch or a failed checksum rejects the snapshot.
+  </Step>
+  <Step title="Replay only the post-watermark delta">
+    Re-insert just the rows at or after the snapshot's watermark — bounded by the snapshot
+    interval, not the corpus size — then **reconcile deletions**: any node tombstoned after the
+    watermark is removed from the restored graph, so a delete (including a GDPR erasure) can never
+    be resurrected by an older snapshot.
+  </Step>
+  <Step title="Fall back to a full scan on corruption">
+    If no valid snapshot exists — or the snapshot path fails partway — the graph is reset and the
+    whole table is paged from PostgreSQL (the vectors there are still valid). Exceeding the
+    rehydration budget alerts but never crashes the process.
+  </Step>
+</Steps>
+
+<Note>
+Bounded delta replay is what makes the high-availability warm-standby RTO achievable. See
+[/operations/high-availability](/operations/high-availability).
+</Note>
+
+## The graph readiness probe
+
+A `"graph"` health probe reports the rehydration state that storage probes cannot:
+
+- **Loading** while rehydrating — `/readyz` returns 503 and the load balancer withholds traffic.
+- **Up** when the mesh is complete and consistent with the watermark — `/readyz` may go ready.
+- **Down** when the snapshot is corrupt and the full-scan fallback also fails — `/readyz` stays 503;
+  the server never serves a partial mesh.
+
+This probe is the availability-during-rebuild semantics that a plain "page the whole table on boot"
+rehydration lacked, and it is the prerequisite high availability builds on.
+
+## RPO and RTO
+
+| Scenario | RPO | RTO |
+|----------|-----|-----|
+| HA failover (warm standby) | ≤ 5s with async replication; 0 with synchronous commit | ≤ 60s |
+| DR restore (rebuild from backup) | ≤ backup cadence (PITR ≈ ≤ 5 min) | Minutes to hours |
+
+HA failover is warm because the standby already holds a replica and a recent snapshot. DR restore is
+cold because it rebuilds the system of record itself from a backup before the mesh can rehydrate.
+
+The full restore procedure is the [DR restore runbook](https://github.com/hyphae-db/hyphae-core/blob/main/deploy/runbooks/dr-restore.md)
+in `deploy/runbooks/`. One step there is easy to miss and load-bearing: **after a point-in-time
+restore, clear the snapshot volume** (`rm /var/lib/hyphae/snapshots/*.snap`) before the first boot.
+A snapshot taken after the restore target contains nodes the rewound database no longer has, and a
+PITR rewind is not a tombstoned delete — the reconcile pass cannot evict them. An empty snapshot
+directory forces the clean full rehydration from the restored system of record.
+
+## Deferred to V2
+
+PostgreSQL PITR and model-cache snapshots ship for V1. The V2 storage engine's own PITR, background
+page-scrubbing, and WAL-after-image page repair are deferred to the V2 engine.
+
+## Source
+
+This page is a teaching restatement of the
+[durability-and-dr spec](https://github.com/hyphae-db/hyphae-core/blob/main/specs/durability-and-dr.md);
+that spec is authoritative for any detail here.

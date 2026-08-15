@@ -1,0 +1,217 @@
+---
+title: TypeScript SDK
+description: Async gRPC client for HyphaeDB — connect, store and recall memory, and consume the live gossip inbox from Node.js.
+---
+
+The TypeScript SDK (`@hyphaedb/client`) is the thin smart client your agent imports to talk to a
+HyphaeDB server. It is fully async and gRPC-only: it wraps the wire contract and keeps a warm local
+read cache (your inbox of gossip deliveries plus scene summaries) so `recall` serves from cache
+first and only round-trips the server on a miss. It contains no mesh logic — gossip, the energy
+model, and layer promotion all live server-side. See
+[the client SDK concepts](/concepts/gossip-propagation) for what the inbox delivers.
+
+## Install
+
+The package is `@hyphaedb/client` and requires Node.js 18 or newer.
+
+```bash
+npm install @hyphaedb/client
+```
+
+```typescript
+import { HyphaeClient, CellType } from "@hyphaedb/client";
+```
+
+## Connect and authenticate
+
+Every call authenticates with your full API key — the whole `hyk_...` string. You pass it as the
+second argument to `connect`, and the SDK sends it verbatim as the `x-hyphae-key` gRPC metadata
+header on every RPC. The SDK never parses the key.
+
+<Note>
+Identity is bound once, at connect, from the authenticated key. The SDK never self-asserts
+`source_agent`: there is no method parameter that lets a caller claim to be another agent (the
+server stamps authorship from the key principal). This is a security invariant (INV-4 in the SDK
+spec) enforced structurally — `CellInput` simply has no `sourceAgent` field.
+</Note>
+
+See [the quickstart](/quickstart) for how to obtain a `hyk_...` credential.
+
+<Steps>
+  <Step title="Get your API key">
+    Obtain a `hyk_...` key for your agent (see [the quickstart](/quickstart)). Keep it secret —
+    it is the only credential the SDK needs.
+  </Step>
+  <Step title="Connect">
+    `connect` opens the channel, runs the version-negotiation handshake, and returns a ready
+    client. `endpoint` is a `host:port` such as `localhost:50051`.
+
+    ```typescript
+    const client = await HyphaeClient.connect("localhost:50051", "hyk_your_key_here");
+    ```
+  </Step>
+  <Step title="Start a session">
+    `startSession` opens the live inbox stream and warms the scene cache. The argument is your
+    agent's identity label.
+
+    ```typescript
+    const session = await client.startSession("my-agent");
+    ```
+  </Step>
+</Steps>
+
+## Quickstart
+
+A single end-to-end flow: connect, start a session, store a cell, recall it, consume one inbox
+delivery, then close.
+
+```typescript
+import { HyphaeClient, CellType } from "@hyphaedb/client";
+
+async function main() {
+  // auth is the whole hyk_... key; it rides every RPC as x-hyphae-key and is never parsed.
+  const client = await HyphaeClient.connect("localhost:50051", "hyk_your_key_here");
+  await client.startSession("my-agent"); // opens the live inbox stream
+
+  const nodeId = await client.store({
+    cellType: CellType.DECISION,
+    content: "We ship on Friday",
+    salience: 0.9,
+  });
+  console.log("stored", nodeId);
+
+  const hits = await client.recall({ text: "ship", k: 5 }); // cache-first, server on miss
+  for (const hit of hits) {
+    console.log(hit.score, hit.fromCache, hit.content);
+  }
+
+  for await (const item of client.inbox()) {
+    // deduped gossip deliveries, live
+    console.log("delivered", item.delivery?.diffId);
+    break;
+  }
+
+  await client.close();
+}
+
+main();
+```
+
+## API reference
+
+### connect
+
+```typescript
+HyphaeClient.connect(
+  endpoint: string,
+  auth: string,
+  config?: Partial<ClientConfig>,
+): Promise<HyphaeClient>
+```
+
+Opens the channel, runs the unauthenticated `Info` version-negotiation handshake, binds identity
+from `auth`, and resolves to a ready client. Throws `ConnectError` if the channel never comes up, if
+the handshake fails, or if the server is below the SDK's minimum supported version.
+
+### store
+
+```typescript
+client.store(cell: CellInput): Promise<string>
+```
+
+Persists a cell and resolves to the server `nodeId`. The SDK mints one idempotency key per logical
+call (`crypto.randomUUID()`) and replays it on a transport-error retry, so a retry returns the
+original `nodeId` rather than a duplicate. `salience` (default `0.5`) is validated to `[0.0, 1.0]`
+before any RPC.
+
+### recall
+
+```typescript
+client.recall(query: RecallQuery): Promise<RecallHit[]>
+```
+
+Cache-first recall: scans the local inbox buffer first and falls back to the server only on a miss
+(or when short of `k`). When the cache and the server return the same content, the server copy wins.
+
+### startSession
+
+```typescript
+client.startSession(agentId: string): Promise<Session>
+```
+
+Opens a session for the authenticated agent, starts the background gossip stream, and warms the
+scene cache. `agentId` is your identity label; it is threaded as the session scope, never asserted
+as `source_agent`.
+
+### placeBeacon
+
+```typescript
+client.placeBeacon(interest: string): Promise<string>
+```
+
+Places a standing-interest beacon and resolves to its `nodeId`. The owner is the session agent,
+never caller-asserted. Beacons shape what the mesh routes to you — see
+[positioning and beacons](/concepts/positioning-and-beacons).
+
+### inbox
+
+```typescript
+client.inbox(): AsyncIterableIterator<InboxItem>
+```
+
+A live, reconnecting async iterator over gossip deliveries. Each `InboxItem` is yielded at most once
+(deduped by `diffId`) across the live stream and any number of reconnect replays. The iterator never
+hangs: on a clean `close()` the `for await` returns, and on a fatal (non-transport) stream error it
+throws a typed error. Read `item.delivery?.diffId` for the delivery identity. See
+[gossip propagation](/concepts/gossip-propagation) for what flows down this stream.
+
+### close
+
+```typescript
+client.close(): Promise<void>
+```
+
+Stops the receive loop and closes the channel, unblocking any consumer parked in `inbox()`.
+
+### Types
+
+```typescript
+interface CellInput {
+  cellType: CellType;
+  content: string;
+  sceneId?: string;
+  salience?: number; // defaults to 0.5
+}
+
+interface RecallQuery {
+  text: string;
+  k?: number; // 0 ⇒ use ClientConfig.recallDefaultK
+  cellTypes?: CellType[];
+  sceneId?: string;
+  includeInbox?: boolean; // defaults to true
+}
+
+interface RecallHit {
+  nodeId: string;
+  content: string;
+  cellType: CellType;
+  score: number;
+  fromCache: boolean;
+}
+```
+
+`CellType` is an enum with the nine calibrated values: `DECISION`, `CONSTRAINT`, `RISK`, `PATTERN`,
+`LESSON`, `FACT`, `PREFERENCE`, `CONTEXT`, `TASK` (plus an `UNSPECIFIED` sentinel a newer server's
+unknown value decodes to). Tune buffer sizes, reconnect backoff, and the heartbeat timeout with the
+optional `ClientConfig` overrides.
+
+## Version negotiation
+
+<Note>
+At connect the SDK calls the unauthenticated `Info` RPC to learn the server's version and
+capabilities. If the server is below the SDK's minimum supported version, `connect` throws
+`ConnectError` and returns no client. After connecting, read `client.serverVersion()` and gate
+optional, newer-than-floor features on `client.hasCapability(token)` so the SDK degrades gracefully
+against an older server. See [API versioning](/operations/api-versioning) for the compatibility
+rules.
+</Note>

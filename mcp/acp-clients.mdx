@@ -1,0 +1,134 @@
+---
+title: "ACP clients (Zed and friends)"
+description: "Two ways to reach HyphaeDB from an Agent Client Protocol editor: through the MCP surface an ACP agent already speaks, or by running HyphaeDB itself as an ACP memory agent."
+---
+
+**ACP here means Zed's [Agent Client Protocol](https://agentclientprotocol.com)** — the editor↔agent JSON-RPC protocol where the *editor* launches the *agent* as a subprocess and drives it through `initialize` → `session/new` → `session/prompt`.
+
+<Warning>
+Not to be confused with IBM/BeeAI's **Agent Communication Protocol**, which shares the acronym. That one merged into A2A under the Linux Foundation in 2025 and is covered by the [A2A surface](/a2a/overview) instead. If a tool says "ACP", check which one it means before wiring anything.
+</Warning>
+
+There are two ways to get HyphaeDB memory into an ACP editor, and they solve different problems.
+
+| | Path 1 — through MCP | Path 2 — `acp-stdio` |
+|---|---|---|
+| What runs | Your existing ACP agent, plus HyphaeDB as one of its MCP servers | HyphaeDB itself, as an ACP agent |
+| Who uses the memory | The agent, as tools it may call | You, by typing commands |
+| Model involved | Your agent's | **None** |
+| Needs | An ACP agent that advertises MCP support | An ACP client that can launch a second agent |
+
+---
+
+## Path 1 — your ACP agent reaches HyphaeDB through MCP
+
+This works **today** with the shipped [MCP surface](/mcp/overview) and needs nothing ACP-specific from us.
+
+Many ACP agents (`claude-agent-acp` and its class) can connect to MCP servers on your behalf. The editor passes an `mcpServers` list when it opens a session; the agent connects to each one and exposes its tools to the model. Point one of those entries at HyphaeDB and the agent gains all 11 memory tools.
+
+```json
+{
+  "mcpServers": [
+    {
+      "name": "hyphaedb",
+      "command": "/usr/local/bin/hyphae-server",
+      "args": ["mcp-stdio"],
+      "env": [
+        { "name": "HYPHAE_API_KEY", "value": "hyk_..." },
+        { "name": "DATABASE_URL", "value": "postgres://user:pass@host/hyphae" }
+      ]
+    }
+  ]
+}
+```
+
+The agent's model then decides when to `store` and `recall`. That is the right shape when you want memory to be *automatic*.
+
+---
+
+## Path 2 — run HyphaeDB as an ACP memory agent (`acp-stdio`)
+
+The `acp-stdio` mode makes the HyphaeDB binary itself an ACP agent. Your editor launches it like any other agent, and its "conversation" is a memory console.
+
+```bash
+hyphae-server acp-stdio
+```
+
+Configure it as an agent in your ACP client, with the same two environment variables the MCP path uses:
+
+| Variable | Purpose |
+|----------|---------|
+| `HYPHAE_API_KEY` | The launch token. It IS the identity for the whole process — every memory stored in that session is attributed to this credential. Resolved once at startup through the secrets seam; a missing or invalid key means the process refuses to start. |
+| `DATABASE_URL` | The Postgres DSN. The editor's machine needs to reach the database, exactly as `mcp-stdio` does. |
+
+`acp-stdio` binds no ports and writes only ACP frames to stdout — all logging goes to stderr, because anything else on stdout would corrupt the protocol stream.
+
+### It performs no inference
+
+This is the part worth internalising before you use it: **`session/prompt` is a command contract, not a model.** There is no LLM in `acp-stdio`. A prompt is *parsed*, not interpreted, and the same prompt against the same memories always produces the same result.
+
+That is why it can be trusted with a credential and pointed at your real memory store: nothing is inferred, generated, or guessed.
+
+### The grammar
+
+```
+/store [--type <CellType>] [--salience <0..1>] <content>   store a memory (default: Fact, 0.5)
+/recall [--k <n>] <query>                                  recall similar memories (default k=10)
+/query --layer <L0|L1|L2> [--k <n>] <query>                recall at an explicit layer
+/help                                                      show this text
+```
+
+**Anything that is not a `/`-command is treated as `/recall <text>`.** That default matters: some editors intercept `/`-commands before the agent ever sees them, and plain text still performs the primary operation.
+
+`CellType` is one of `Decision`, `Constraint`, `Risk`, `Pattern`, `Lesson`, `Fact`, `Preference`, `Context`, `Task`.
+
+Examples:
+
+```text
+we decided to ship Postgres for V1
+  → recalls memories similar to that sentence
+
+/store --type Decision --salience 0.9 We ship Postgres for V1
+  → stored 6f1c…-…
+
+/recall --k 3 gossip energy model
+  → up to three matches, nearest first
+
+/query --layer L2 architecture patterns
+  → recall against the consolidated L2 layer
+```
+
+Verbs and flag *values* are case-insensitive (`/QUERY --layer l1 x` works). Flag *names* are not: `--LAYER` is rejected rather than silently ignored, because a near-miss flag name means you expected behaviour that would not have been applied.
+
+A mistyped command is reported in the conversation (`error: unknown command "/recal"; try /help`) and the turn ends normally — it is not a protocol error. A typo never silently becomes a search for the literal text you typed.
+
+### Results
+
+Each match comes back as one message chunk:
+
+```text
+6f1c2b9e-… distance=0.1234 type=Decision
+We ship Postgres for V1
+```
+
+`/store` answers `stored <id>`. An empty search answers `no results` rather than saying nothing.
+
+### Sessions
+
+`session/new` opens a HyphaeDB session scoped to the `cwd` your editor sends — the working directory becomes the project scope memories are filed under. `session/load` resumes one after a restart, so a session outlives the agent process. Sessions are **per-credential**: a session opened under one API key is unreachable from another, and a request for someone else's session id is indistinguishable from a request for one that never existed.
+
+---
+
+## What this agent will not do
+
+These are deliberate, and they are why it is safe to point at a real database:
+
+- **It never runs your `mcpServers`.** An ACP client may pass a list of MCP servers to connect to, and a stdio entry is a *command line*. Honouring one would hand any ACP client arbitrary command execution on your machine. The list is accepted and dropped.
+- **It never touches your filesystem or terminal.** ACP lets an agent ask the editor to read files, write files, or run terminals. This one issues none of those requests, whatever your client advertises.
+- **It declares only what it implements.** `initialize` reports `loadSession: true` and every prompt capability as `false` — and images, audio and embedded file contents are genuinely rejected rather than quietly ignored, so a client is never told a capability exists that does not.
+
+## Which path should I use?
+
+Use **Path 1** when you want your coding agent to remember things on its own — memory as a tool the model reaches for.
+
+Use **Path 2** when you want to inspect, curate or seed the memory yourself, deterministically, without a model between you and the store. Many teams run both against the same database: the agent writes, and you audit.

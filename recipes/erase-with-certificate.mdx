@@ -1,0 +1,71 @@
+---
+title: "Recipe: erase data with a certificate"
+description: Run a compliant, audited bulk erasure by scope and keep the erasure certificate as a non-repudiable receipt.
+---
+
+**Goal.** Delete an agent's, a project's, or a node's data for a compliance request (e.g. GDPR erasure)
+and come away with a **certificate** proving it happened.
+
+**Prerequisites.**
+- An **operator session** with admin authority — erasure is an `/admin/api` control-plane operation, not
+  a data-plane call. An `erase Agent` scope is `ServiceAdmin`-only; a `ProjectAdmin` may erase within its
+  own tenant. See the [admin control plane](/operations/admin-control-plane).
+
+## The safety envelope
+
+Erasure is irreversible, so it carries a **typed confirmation**: the `confirm` field must exactly equal
+the scope's canonical label — `agent:<id>`, `project:<id>`, or `node:<uuid>`. A mismatch destroys
+nothing and still writes a `Denied` audit of the attempt. Always **dry-run first**.
+
+## Steps
+
+<Steps>
+  <Step title="Dry-run to see the blast radius">
+    `dry_run: true` returns the would-remove counts without deleting anything:
+
+    ```bash
+    curl -s --cookie "hyphae_admin_session=<your-session>" \
+      -X POST "https://console.example/admin/api/erase" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "scope": { "kind": "agent", "id": "agent-1234" },
+        "confirm": "agent:agent-1234",
+        "dry_run": true
+      }'
+    ```
+  </Step>
+
+  <Step title="Run it for real">
+    Flip `dry_run` to `false`. The response is the **erasure certificate** — the per-tier removal counts
+    (`nodes_removed`, `diffs_removed`, `deliveries_removed`, `sessions_removed`, `tombstones_propagated`,
+    …) plus a `digest`:
+
+    ```bash
+    curl -s --cookie "hyphae_admin_session=<your-session>" \
+      -X POST "https://console.example/admin/api/erase" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "scope": { "kind": "agent", "id": "agent-1234" },
+        "confirm": "agent:agent-1234",
+        "dry_run": false
+      }'
+    ```
+  </Step>
+
+  <Step title="Keep the receipt">
+    Store the returned certificate. The erase also writes an `Erase` row to the tamper-evident
+    [audit log](/operations/audit-log), so you have two independent records that the deletion occurred.
+  </Step>
+</Steps>
+
+<Note>
+To remove a single memory rather than a whole scope, use `POST /admin/api/nodes/{id}/delete` — a
+tombstone-first, idempotent delete that propagates the removal through the mesh. See
+[data lifecycle](/operations/data-lifecycle).
+</Note>
+
+## See also
+
+- [Admin control plane](/operations/admin-control-plane) — the erase confirmation, authority, and the certificate fields.
+- [Data lifecycle](/operations/data-lifecycle) — the tombstone and erasure mechanics underneath.
+- [Audit log](/operations/audit-log) — the `Erase` record and the hash chain.

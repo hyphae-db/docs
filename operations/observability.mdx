@@ -1,0 +1,104 @@
+---
+title: Observability & metrics
+description: How to scrape HyphaeDB's metrics, the LIVE-vs-RESERVED naming contract enforced in CI, the bounded-label cardinality discipline, and a catalog of the hyphae.* metrics by subsystem.
+---
+
+<Note>
+**Status: built (V1).** Every crate emits through the `metrics` facade; a single recorder is installed
+once at startup. Build with `--features prometheus` and set `mode = "prometheus"` to expose a
+`/metrics` scrape endpoint; the default build installs a no-op/stdout recorder (no exporter). OTLP
+**trace** export is feature-gated (`--features otlp`). **Deferred:** the metrics→OTLP bridge and the
+per-request server middleware histograms — the counters and gauges below are live, the RPC latency
+middleware is not yet wired everywhere.
+</Note>
+
+HyphaeDB is instrumented through the [`metrics`](https://docs.rs/metrics) facade: application crates
+call `counter!`/`gauge!`/`histogram!` and never name an exporter. Exactly one crate — `hyphae-telemetry`
+— installs the concrete recorder and subscriber, chosen once at `main()`. This keeps the product code
+backend-agnostic: switching from stdout to Prometheus to OTLP is a deployment choice, not a code change.
+
+## Scraping metrics
+
+The Prometheus exporter is feature-gated so the default build pulls in no HTTP-exporter dependency:
+
+- Build the server with `--features prometheus`.
+- Set the observability `mode` to `prometheus`.
+- The telemetry layer then mounts a `/metrics` scrape endpoint (via `prometheus_router`) that renders
+  the current registry in Prometheus text format. Its bind/port is governed by the `PrometheusConfig`
+  section — see [Configuration](/operations/configuration).
+
+Without the feature, `mode = "prometheus"` is a **boot error** (the server refuses to start rather than
+pretend to export), and the default mode installs a no-op/stdout recorder so metric calls are cheap and
+harmless.
+
+## The naming contract
+
+Metric names are not free-form. `hyphae-telemetry` owns a canonical registry that every name must pass,
+and CI enforces it as a **bidirectional** contract (the `metrics_conformance` guard):
+
+- **LIVE** (89 names today) — declared **and** emitted by live code. The guard fails if a LIVE name is
+  never emitted, or if code emits a name that is not declared LIVE. Declaration and reality cannot drift.
+- **RESERVED** (15 names today) — declared but not yet emitted, each with a `// pending:` marker naming
+  the emit site still to be wired. The guard fails if a RESERVED name is emitted (promote it to LIVE
+  first) — so a half-wired metric can't sneak in undocumented.
+
+Every name also passes a **shape** check (dotted `hyphae.<subsystem>.<name>` segments, a `.total`
+suffix for counters, `.seconds`/`.bytes` unit suffixes). This is why the catalog below can be trusted:
+an unmarked name in it is a name the build guarantees is emitted, and the handful of RESERVED names
+listed are marked as such inline.
+
+## Bounded labels: the cardinality rule
+
+A metric label may only be one of a fixed **allowlist** of bounded, enumerable keys — `layer`,
+`cell_type`, `transport`, `method`, `code`, `outcome`, `action`, `result`, `decision`, `detector`,
+`stance`, `scope`, `reason`, `provider`, `model`, and a handful more. Per-entity identifiers —
+`agent_id`, `tenant_id`, `node_id`, a `target` — are **never** labels: they would make the time-series
+cardinality unbounded. That per-actor detail lives in the [audit log](/operations/audit-log) and on
+`tracing` event attributes instead.
+
+The rule is enforced at runtime, not just by convention: in release builds the recorder **drops** a
+disallowed label and increments `hyphae.telemetry.dropped_labels.total{metric}` (naming the offending
+instrument), so a cardinality mistake is visible rather than a silent metrics-store blowup. A debug
+build panics on it, so it never reaches a PR.
+
+## Catalog by subsystem
+
+A representative slice — the operationally important metrics, grouped. All names are verbatim from the
+registry.
+
+| Subsystem | Metrics |
+|-----------|---------|
+| **Gossip** | `hyphae.gossip.propagations.total`, `hyphae.gossip.hops.total`, `hyphae.gossip.deliveries.total`, `hyphae.gossip.energy.consumed.total`, `hyphae.gossip.depth`, `hyphae.gossip.breaker.open.total`, `hyphae.gossip.shed.total` |
+| **Mesh & promotion** | `hyphae.mesh.promotion.total`, `hyphae.mesh.promotion.blocked.total`, `hyphae.mesh.demotion.total`, `hyphae.mesh.beacons.active`, `hyphae.mesh.beacons.activations.total`, `hyphae.mesh.position.updates.total`, `hyphae.mesh.sweep.pairs_checked.total`, `hyphae.mesh.sweep.diffs_forwarded.total` |
+| **Trust & contradiction** | `hyphae.mesh.trust.score.distribution`, `hyphae.mesh.trust.confirmed.total`, `hyphae.mesh.trust.contradicted.total`, `hyphae.contradiction.candidates.total`, `hyphae.contradiction.detections.total` (`detector`, `stance`), `hyphae.contradiction.duration.seconds` |
+| **Consolidation** | `hyphae.consolidation.runs.total`, `hyphae.consolidation.patterns_created.total`, `hyphae.consolidation.cells_superseded.total`, `hyphae.consolidation.queue.depth` |
+| **HNSW & storage** | `hyphae.hnsw.node.count`, `hyphae.hnsw.prune.total`, `hyphae.hnsw.evict.total`, `hyphae.storage.query.total`, `hyphae.storage.query.duration.seconds`, `hyphae.storage.rehydrate.duration.seconds`; RESERVED (declared, not yet emitted): `hyphae.hnsw.edge.count` |
+| **Protocol** | `hyphae.inbox.forwarded.total`; RESERVED (declared, not yet emitted): `hyphae.rpc.requests.total`, `hyphae.rpc.duration.seconds`, `hyphae.inbox.streams.open`, `hyphae.inbox.replay_items.total` |
+| **Plugins** | `hyphae.plugin.selected`, `hyphae.plugin.init.duration.seconds`, `hyphae.plugin.init.failures.total`, `hyphae.plugin.health` — see [Extending HyphaeDB](/extending) |
+| **Admin control plane** | `hyphae.admin.operations.total`, `hyphae.admin.operation.duration.seconds`, `hyphae.descriptor.imports.total` — see [Admin control plane](/operations/admin-control-plane) |
+| **A2A** | `hyphae.a2a.requests.total`, `hyphae.a2a.tasks.total`, `hyphae.a2a.streams.open` — see [A2A](/a2a/overview) |
+| **Auth & authz** | `hyphae.auth.authenticate.total`, `hyphae.auth.jwks.refresh.total`, `hyphae.auth.issue.total`, `hyphae.auth.revoke.total`, `hyphae.auth.rotate.total`, `hyphae.authz.decision.total` |
+| **Audit** | `hyphae.audit.events.total` (`action`, `outcome`), `hyphae.audit.write.errors.total`, `hyphae.audit.dropped.total`, `hyphae.audit.retention.trimmed.total` — see [Audit log](/operations/audit-log) |
+| **Data lifecycle** | `hyphae.lifecycle.gc.passes.total`, `hyphae.lifecycle.gc.diffs_deleted.total`, `hyphae.lifecycle.evictions.total`, `hyphae.lifecycle.reembed.nodes.total`, `hyphae.lifecycle.erasures.total` |
+| **Observatory** | `hyphae.observatory.events.recorded.total`, `hyphae.observatory.events.dropped.total`, `hyphae.observatory.buffer.depth`, `hyphae.observatory.streams.active`, `hyphae.observatory.replay.events.total` — see [Topology Observatory](/operations/topology-observatory) |
+| **Health & self** | `hyphae.health.role` (0 standby / 1 primary / 2 fenced), `hyphae.telemetry.dropped_labels.total`, `hyphae.telemetry.export.errors.total` |
+
+## Health role gauge
+
+`hyphae.health.role` is a gauge whose **value** is the role — `0` standby, `1` primary, `2` fenced —
+not a labelled series. It pairs with [High availability](/operations/high-availability): a load balancer
+routes to a ready primary, and this gauge tells you which instance believes it holds the lease.
+
+## Traces
+
+Distributed tracing exports via OTLP under `--features otlp` (off by default). The `tracing`
+subscriber is installed by the same telemetry layer; every audited action is also a `tracing` event at
+`target = "audit"`. The metrics→OTLP bridge is not yet wired — metrics and traces export on independent
+backends today.
+
+## Source
+
+This page is a teaching restatement of the
+[observability spec](https://github.com/hyphae-db/hyphae-core/blob/main/specs/observability.md) and the
+[observability-metrics-completeness spec](https://github.com/hyphae-db/hyphae-core/blob/main/specs/observability-metrics-completeness.md);
+those specs are authoritative for any detail here.

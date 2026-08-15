@@ -1,0 +1,132 @@
+---
+title: Topology Observatory
+description: Watch memories propagate across the mesh in real time — a tenant-scoped, read-only operator stream of every hop a MemoryDiff takes, with a bounded scrub-back window and a live tail.
+---
+
+<Note>
+**Status: built (V1 — all phases).** A bounded rolling buffer records every propagation hop, and
+`GET /admin/api/observatory/stream` (WebSocket) + `GET /admin/api/observatory/events` (JSON) serve it
+under the console's operator session. The **Mycelium Observatory screen** that visualizes this stream
+ships in the console build: the server embeds and serves the console at `/admin` behind the
+default-off `embed-console` packaging feature. Recording is enabled by default in the `dev` profile,
+**off by default in `production`** (opt in explicitly).
+</Note>
+
+HyphaeDB's thesis is that knowledge *propagates* — a stored `MemoryDiff` diffuses hop-by-hop across the
+mesh under an energy budget rather than being fetched by a query. The Topology Observatory is the
+instrument that makes that visible: it records each hop a diff takes — where it went, what it cost, and
+why it stopped — and streams that to an operator, replaying the recent past and then tailing live.
+
+It is a **read-only** view. The Observatory never touches the mesh it watches; with observation
+disabled the gossip walk is byte-for-byte identical (a load-bearing invariant — the tool cannot perturb
+the system it measures).
+
+## What it records
+
+Every propagation hop becomes one **content-free** event. The event carries the shape of propagation —
+never the memory's content, embedding, or payload:
+
+| Field | Meaning |
+|-------|---------|
+| `diff_id` | The propagating diff (stable across all its hops — trace a whole propagation by grouping on it). |
+| `from_node` / `to_node` | The edge this hop traversed (`from_node` is `null` at the seed). |
+| `hop_index` | 0 at the origin, incrementing each hop. |
+| `energy_before` / `energy_after` | The energy budget entering and leaving the hop — watch it decay toward the floor. |
+| `walk_layer` | The origin node's resident layer (`0` \| `1` \| `2`). |
+| `outcome` | `delivered` \| `deduped` \| `pruned` \| `exhausted` — why the hop ended as it did. |
+| `salience` | The diff's salience. |
+| `ts` | RFC3339 timestamp. |
+| `tenant_id` / `origin_agent` | Provenance, stamped from the authenticated origin. |
+
+The `outcome` is the story of a propagation's edge: `delivered` reached a new neighbour, `deduped` hit a
+node that already had the diff, `pruned` failed the relevance gate, `exhausted` ran the energy budget to
+the floor.
+
+## Authentication and tenant scoping
+
+The Observatory rides the **console operator session** (the same OIDC login as the admin console), not
+the `x-hyphae-key` data-plane key — see [Authorization](/operations/authorization). Two authority
+levels, and the tenant boundary is enforced on **every** event on **both** the replay and the live tail:
+
+- A **service admin** sees propagation across all tenants.
+- A **project admin** sees **only its own tenant's** events. It can never observe — or even infer the
+  existence of — another tenant's traffic: a cross-tenant event, and every id derived from it, is
+  filtered out before it can reach the socket. This is a hard isolation guarantee, not a display filter.
+
+An unauthenticated request is refused with `401` before the WebSocket upgrade; an authenticated
+non-admin is `403`.
+
+## The stream endpoint
+
+```
+GET /admin/api/observatory/stream        (WebSocket)
+```
+
+The connection authenticates **before** the upgrade, then does two things on one socket:
+
+<Steps>
+  <Step title="Replay the buffered window">
+    The recent past, oldest-first, as JSON event frames. Pass `?since=<rfc3339>` to replay only events
+    newer than a watermark; omit it to replay the whole retained window (the scrub-back "time machine").
+    A malformed `?since` is a clean `400` — no upgrade.
+  </Step>
+  <Step title="Tail live">
+    After the replay drains, every new propagation streams as it happens. If a slow consumer falls
+    behind, the server sends a `{"resync":true}` marker instead of silently dropping events — reconnect
+    with `?since=<last-seen-ts>` to close the gap.
+  </Step>
+</Steps>
+
+Each event frame is the content-free shape above. Because propagation is usually debugged *after* it
+happens, the replay-then-tail design is deliberate: connect and you get the recent history **and** the
+live present, so you never have to be watching at the exact moment a diff misroutes.
+
+Concurrent streams are capped (`max_concurrent_streams`, default 16); a connection over the cap is
+refused with `429` before the upgrade.
+
+## The snapshot endpoint
+
+For scripts and dashboards that want a one-shot pull instead of a live socket:
+
+```
+GET /admin/api/observatory/events?since=<rfc3339>&limit=<n>
+```
+
+Returns a JSON array of the most-recent events (newest-last, capped by `limit`), under the same auth and
+the same tenant filter as the stream.
+
+## Configuration
+
+The `observatory` config section (profile-derived defaults):
+
+| Key | Default (`dev`) | Meaning |
+|-----|-----------------|---------|
+| `enabled` | `true` (`false` in `production`) | Master gate. Off ⇒ the walk records and emits nothing. |
+| `sample_rate` | `1.0` | Fraction of propagations recorded, decided per `diff_id` (a trace is whole-or-nothing). Lower it under heavy load in `production`. |
+| `max_events` | `50000` | Ring-buffer count bound (oldest evicted). ≈6 MiB at ≈120 B/event. |
+| `max_age` | `600` (seconds) | Scrub-back window; events older than this age out. |
+| `stream_channel_capacity` | `16384` | Live fan-out bound; overflow drops oldest and signals `resync`. |
+| `max_concurrent_streams` | `16` | Cap on simultaneously-attached console streams. |
+
+The buffer is bounded by **both** count and age and never blocks the propagating walk: if the recording
+channel saturates, events are dropped and counted, never queued unboundedly. `sample_rate` is the
+release valve for a busy `production` mesh.
+
+## Observability
+
+The recorder and stream emit `hyphae.observatory.*` metrics — see the [metrics
+reference](/operations/observability):
+
+| Metric | Meaning |
+|--------|---------|
+| `hyphae.observatory.events.recorded.total` | Events recorded into the buffer. |
+| `hyphae.observatory.events.dropped.total` | Events dropped on a saturated channel (`reason="lagged"`). |
+| `hyphae.observatory.buffer.depth` | Current ring-buffer occupancy. |
+| `hyphae.observatory.streams.active` | Attached console streams (up-down gauge). |
+| `hyphae.observatory.replay.events.total` | Events replayed to connecting consoles. |
+
+## Source
+
+This page is a teaching restatement of the
+[topology-observatory spec](https://github.com/hyphae-db/hyphae-core/blob/main/specs/topology-observatory.md);
+that spec is authoritative for any detail here.

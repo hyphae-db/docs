@@ -1,0 +1,215 @@
+---
+title: "Quickstart"
+description: "Bring up HyphaeDB with Docker Compose, create your first credential as you boot, then store and recall your first memory."
+---
+
+This quickstart takes you from nothing to a stored-and-recalled memory. You will start the
+server with a credential you generate yourself, connect an SDK client with that credential,
+store a memory, and recall it. The whole flow runs locally, and the commands on this page are
+executed in CI against every relevant change — what you see is what HEAD does.
+
+<Note>
+You cannot connect without a credential. Step 2 generates one **as part of booting the
+server** — identity in HyphaeDB always comes from an authenticated credential, never from the
+request body (INV-5).
+</Note>
+
+<Steps>
+  <Step title="Get the stack">
+    HyphaeDB ships as a container alongside a PostgreSQL (pgvector) database, both defined in
+    the repo's [`deploy/docker-compose.yml`](https://github.com/hyphae-db/hyphae-core/blob/main/deploy/docker-compose.yml):
+
+    ```bash
+    git clone https://github.com/hyphae-db/hyphae-core.git
+    cd hyphae-core
+    ```
+
+    The compose file **builds the server image from source** — at public launch this becomes a
+    published-image pull; the compose file is the single line that changes. The first run takes
+    longer: it compiles the server image once, and it is cached thereafter.
+  </Step>
+
+  <Step title="Create your credential and start the server">
+    Generate your API key and boot with it — the server registers the supplied key as the
+    first administrator on an empty registry (`HYPHAEDB_BOOTSTRAP_ADMIN`, the
+    `name:hyk_<kid>_<secret>` form; any other key shape is rejected at boot). Because **you**
+    generate the key, it never needs to be recovered from logs, and it survives container
+    recreation:
+
+    ```bash
+    COMPOSE_FILE=deploy/docker-compose.yml
+    ```
+
+    {/* hyphae-example: examples/_shared/quickstart_smoke.sh#L35-L36 */}
+    ```bash
+    export HYPHAE_API_KEY="hyk_$(LC_ALL=C tr -dc a-z0-9 </dev/urandom | head -c 12)_$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
+    HYPHAEDB_BOOTSTRAP_ADMIN="quickstart-admin:$HYPHAE_API_KEY" docker compose -f "$COMPOSE_FILE" up --build -d
+    ```
+
+    The same exported `HYPHAE_API_KEY` is what the SDK reads in step 3 — zero copy-paste of
+    secrets, nothing logged. These exact lines are CI-executed
+    (`examples/_shared/quickstart_smoke.sh`), so they cannot drift from the server.
+
+    The server listens for gRPC on `localhost:50051` and REST on `localhost:8080`. Verify it is
+    ready before connecting:
+
+    ```bash
+    curl -s localhost:8080/healthz   # 200 {"status":"ok"} — the process is alive
+    curl -s localhost:8080/readyz    # 200 once storage, embedding, and the mesh are all up
+    ```
+
+    `/readyz` returns 503 while the mesh is still rehydrating; its JSON body names the probe
+    that is not ready yet.
+
+    <Note>
+    This key is the **first-operator credential** (a `ServiceAdmin`) — fine for a local
+    quickstart. In production, operators issue per-agent credentials instead: see
+    [authorization](/operations/authorization). And if you just want runnable multi-agent
+    demos with **zero credential steps at all**, the [`examples/` tree](https://github.com/hyphae-db/hyphae-core/tree/main/examples)
+    auto-provisions its identities over the Dev-profile `POST /v1/dev/provision` surface —
+    run any recipe with `../../_shared/up.sh && ./run.sh`.
+    </Note>
+
+    <Warning>
+    The server stamps the authoring agent from the authenticated credential. There is no field
+    on the write path for a client to assert who it is — `source_agent` is never self-asserted
+    (INV-5).
+    </Warning>
+  </Step>
+
+  <Step title="Connect and start a session">
+    Install a client SDK and connect with your endpoint and key. Starting a session scopes you
+    to a project and opens the background gossip stream that feeds your inbox and warms the
+    read cache.
+
+    <CodeGroup>
+    ```bash Python
+    pip install hyphaedb
+    ```
+
+    ```bash TypeScript
+    npm install @hyphaedb/client
+    ```
+
+    ```toml Rust
+    # Cargo.toml
+    [dependencies]
+    hyphae-client = "0.1"
+    ```
+    </CodeGroup>
+
+    <CodeGroup>
+    {/* hyphae-example: examples/_shared/quickstart_probe.py#L3-L13 */}
+    ```python Python
+    import asyncio
+    import os
+
+    from hyphaedb import CellInput, CellType, HyphaeClient, RecallQuery
+
+
+    async def main():
+        client = await HyphaeClient.connect(
+            "localhost:50051", os.environ["HYPHAE_API_KEY"]
+        )
+        await client.start_session(project="quickstart")
+    ```
+
+    {/* hyphae-example: examples/_shared/quickstart_probe.ts#L3-L10 */}
+    ```typescript TypeScript
+    import { CellType, HyphaeClient } from "@hyphaedb/client";
+
+    async function main(): Promise<void> {
+      const client = await HyphaeClient.connect(
+        "localhost:50051",
+        process.env.HYPHAE_API_KEY!,
+      );
+      await client.startSession("quickstart");
+    ```
+
+    ```rust Rust
+    use hyphae_client::{CellInput, CellType, ClientConfig, HyphaeClient, RecallQuery};
+
+    let key = std::env::var("HYPHAE_API_KEY")?;
+    let client = HyphaeClient::connect("localhost:50051", &key, ClientConfig::default()).await?;
+    client.start_session("quickstart").await?;
+    // ... store and recall go here ...
+    ```
+    </CodeGroup>
+
+    The Python and TypeScript snippets above are line-ranges of the CI-executed quickstart
+    probes under `examples/_shared/` — the Python variant is the primary example for the rest
+    of this page. See the [Python](/sdks/python), [TypeScript](/sdks/typescript), and
+    [Rust](/sdks/rust) SDK guides for the full surface.
+  </Step>
+
+  <Step title="Store a memory">
+    Storing a cell returns its server-assigned node id. The `cell_type` is one of the
+    calibrated types — a `DECISION` carries a higher type multiplier (and so propagates
+    farther) than a routine `TASK`.
+
+    {/* hyphae-example: examples/_shared/quickstart_probe.py#L15-L21 */}
+    ```python
+        node_id = await client.store(
+            CellInput(
+                cell_type=CellType.DECISION,
+                content="We use PostgreSQL + pgvector for V1 storage.",
+            )
+        )
+        print("stored", node_id)
+    ```
+
+    The write returns as soon as the cell is persisted;
+    [propagation](/concepts/gossip-propagation) through the mesh runs asynchronously behind
+    the response.
+  </Step>
+
+  <Step title="Recall it">
+    Recall returns the memories closest to your query text, ranked by relevance. `k` caps the
+    number of hits.
+
+    {/* hyphae-example: examples/_shared/quickstart_probe.py#L23-L25 */}
+    ```python
+        hits = await client.recall(RecallQuery(text="storage engine", k=5))
+        for hit in hits:
+            print(round(hit.score, 3), hit.content)
+    ```
+
+    Each `RecallHit` carries the matched `content`, its `cell_type`, a rank-derived `score`,
+    and a `from_cache` flag indicating whether it came from the warm local cache or the
+    server.
+  </Step>
+
+  <Step title="Watch the inbox (optional)">
+    Because you started a session, diffs that propagate to your agent node arrive on a live
+    inbox. Iterate it to react to knowledge as it reaches you:
+
+    ```python
+    async for item in client.inbox():
+        print("received", item.delivery.diff_id)
+    ```
+
+    The inbox is de-duplicated and replayable: on reconnect the client supplies its last-seen
+    watermark and the server replays what you missed before going live. This is the
+    propagation thesis in action — see [gossip propagation](/concepts/gossip-propagation).
+  </Step>
+</Steps>
+
+## Next steps
+
+<Columns cols={2}>
+  <Card title="Propagation in five minutes" icon="share-nodes" href="/propagation-quickstart">
+    The payoff: watch a memory travel from one agent to another with no query in between.
+  </Card>
+  <Card title="Core concepts" icon="diagram-project" href="/concepts/gossip-propagation">
+    Understand propagation, the energy model, and the HNSW mesh.
+  </Card>
+  <Card title="Python SDK" icon="python" href="/sdks/python">
+    The full async client API: sessions, beacons, scenes, and the inbox.
+  </Card>
+  <Card title="MCP tools" icon="robot" href="/mcp/overview">
+    Wire HyphaeDB into Claude Code or another MCP host as agent memory.
+  </Card>
+  <Card title="Operations" icon="server" href="/operations/docker-compose">
+    Configure, secure, and run a production deployment.
+  </Card>
+</Columns>

@@ -1,0 +1,89 @@
+---
+title: "API reference overview"
+description: "The HyphaeDB REST API — the HTTP fallback surface, its authentication, error envelope, and conventions. Endpoint pages in this section are generated from OpenAPI."
+---
+
+The REST API is the HTTP fallback surface for HyphaeDB. It exposes the same application core as [gRPC](/grpc/overview), [MCP](/mcp/overview), and — when enabled — [A2A](/a2a/overview), for clients that do not have a gRPC stack. If you can use gRPC, prefer it — REST exists so that any HTTP client can still reach the server.
+
+<Note>
+The endpoint pages in this section are **generated from an OpenAPI specification**, not hand-written. This page is the one authored page in the API Reference tab; it covers orientation and conventions that apply across every endpoint. The generated pages carry the per-endpoint request and response detail.
+
+The [A2A binding](/a2a/overview) rides the same REST listener but is **outside the OpenAPI document by design**: `openapi.json` documents exactly the `/v1/*` router and is CI-parity-tested against it, so the checked-in reference is never stale. The A2A surface's machine-readable description is its own agent card.
+</Note>
+
+## Base URL
+
+By default the REST server binds to `0.0.0.0:8080`, so locally the base URL is:
+
+```text
+http://localhost:8080
+```
+
+See [configuration](/operations/configuration) for the bind address and other settings.
+
+## Authentication
+
+Every `/v1/*` request must include your API key in the `x-hyphae-key` header. A request without a valid key is rejected with `401`.
+
+```bash
+curl http://localhost:8080/v1/recall \
+  -H 'x-hyphae-key: hyk_...' \
+  -H 'content-type: application/json' \
+  -d '{"text":"storage engine","k":5}'
+```
+
+Identity is resolved from the credential and never read from the request body, so a client cannot assert another agent's identity (INV-5). See [authorization](/operations/authorization) for roles and scopes.
+
+Two endpoints are unauthenticated: the health endpoint `GET /healthz` (always — liveness probes do not need a key), and, when the [A2A surface](/a2a/overview) is enabled, its agent card at `GET /.well-known/agent-card.json` — unauthenticated by design, because the card is how a conformant A2A client discovers the surface.
+
+## Hydrated results
+
+Over REST, `recall` and `query` return **fully hydrated nodes** in rank order — the complete cell content, not just identifiers. This differs from the [MCP tools](/mcp/overview), where `recall` and `query` return only `{node_id, distance}` and the host fetches detail separately. If you want full nodes from a single call, REST (or gRPC) is the surface to use.
+
+## Maintenance operations
+
+`consolidate_scene` is available over REST as `POST /v1/scenes/{id}/consolidate` (and over [gRPC](/grpc/overview)), but it is **not** an MCP tool — it is a maintenance operation rather than an agent-facing memory operation.
+
+## Error envelope
+
+Errors return a consistent JSON envelope:
+
+```json
+{
+  "error": {
+    "code": "<machine code>",
+    "message": "<human-readable text>"
+  }
+}
+```
+
+The `code` is a stable machine-readable string you can branch on; the `message` is descriptive text for logs and humans. Status codes map as follows:
+
+| Status | Condition |
+|--------|-----------|
+| `400` | Validation error — malformed or out-of-range request. |
+| `401` | Unauthorized — missing or invalid credential. |
+| `403` | Forbidden — authenticated but not permitted. |
+| `404` | Not found. |
+| `409` | Conflict or transaction error. |
+| `429` | Quota exceeded or rate limited — `rate_limited` includes a `Retry-After` header; `quota_exceeded` does not. |
+| `503` | Service or storage unavailable. |
+| `504` | Timeout. |
+| `500` | Internal error. |
+
+<Info>
+On a `429`, honor the `Retry-After` header before retrying. The SDKs already retry transport-level failures with backoff; for raw HTTP clients, respect `Retry-After` to avoid compounding load.
+</Info>
+
+## Related pages
+
+- [gRPC overview](/grpc/overview) — the primary, lower-overhead surface.
+- [MCP tools](/mcp/overview) — the agent-facing tool surface (note the `recall`/`query` shape difference above).
+- [Python SDK](/sdks/python) — a typed client that wraps these conventions for you.
+- [Authorization](/operations/authorization) — credentials, roles, and scopes.
+
+## Source
+
+This page restates the protocol layer's REST surface and conventions; it defines no new behavior.
+
+- [protocol-layer spec §5.6, §7.4](https://github.com/hyphae-db/hyphae-core/blob/main/specs/protocol-layer.md) — the REST routes, the error-to-HTTP mapping, and authentication.

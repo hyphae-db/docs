@@ -1,0 +1,72 @@
+---
+title: "place_beacon"
+description: "Place a standing interest beacon over MCP so matching diffs gossip to you; returns the beacon node id."
+---
+
+Place a standing interest beacon. The server embeds the interest text and fixes its position in the mesh, so future diffs that match it gossip to you. It returns the beacon's node id.
+
+Dispatches to the `place_beacon` internal service method. See [Positioning and beacons](/concepts/positioning-and-beacons) for how beacons attract gossip.
+
+## Parameters
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `interest` | string | Yes | — | The interest text to embed as a beacon. |
+
+The beacon is owned by the authenticated principal — there is no owner parameter.
+
+## Returns
+
+```json
+{ "node_id": "<uuid>" }
+```
+
+Returned as the `structuredContent` payload.
+
+## Example
+
+Request:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "place_beacon",
+    "arguments": { "interest": "changes to the storage engine trait" }
+  }
+}
+```
+
+Response:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": [
+      { "type": "text", "text": "{\"node_id\":\"016c25fd-70e0-56fe-95d4-7dc06d72e8d9\"}" }
+    ],
+    "structuredContent": { "node_id": "016c25fd-70e0-56fe-95d4-7dc06d72e8d9" },
+    "isError": false
+  }
+}
+```
+
+## Annotations
+
+The tool's MCP behaviour hints, as emitted in `tools/list` (advisory display metadata — see [the annotations contract](/mcp/overview#tool-annotations)):
+
+| `readOnlyHint` | `destructiveHint` | `idempotentHint` | `openWorldHint` |
+|---|---|---|---|
+| `false` | `false` | `false` | `false` |
+
+Mints a new beacon node per call — additive, not idempotent: two calls with the same `interest` leave two live beacons.
+
+## Related
+
+- [list_beacons](/mcp/tools/list-beacons) to see the beacons you own.
+- [inbox](/mcp/tools/inbox) to drain the diffs your beacons attract.
+- [Positioning and beacons](/concepts/positioning-and-beacons).

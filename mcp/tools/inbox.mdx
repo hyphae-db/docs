@@ -1,0 +1,73 @@
+---
+title: "inbox"
+description: "Drain the memory diffs gossiped to the calling agent since a timestamp, over MCP."
+---
+
+Drain this agent's inbox: the memory diffs gossiped to you since `last_seen`. The drain is scoped to your own inbox and returns the pending items.
+
+Dispatches to the `open_inbox` internal service method.
+
+## Parameters
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `last_seen` | string | No | full history | An RFC3339 timestamp. Items delivered after it are drained. Empty or omitted drains your full delivery history. |
+
+## Returns
+
+```json
+{ "items": [ /* InboxItem */ ] }
+```
+
+Returned as the `structuredContent` payload. Each `InboxItem` carries the delivered memory diff and its delivery record.
+
+<Note>
+Over stdio, `inbox` is a per-call **drain** of your own inbox — a one-shot pull, not a live stream. It is scoped to the authenticated principal, so there is no cross-agent leak. For a live, push-based gossip stream, use an SDK such as [Python](/sdks/python) or the gRPC `Inbox` stream described in the [gRPC overview](/grpc/overview).
+</Note>
+
+## Example
+
+Request:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "inbox",
+    "arguments": { "last_seen": "2026-06-27T00:00:00Z" }
+  }
+}
+```
+
+Response:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": [
+      { "type": "text", "text": "{\"items\":[]}" }
+    ],
+    "structuredContent": { "items": [] },
+    "isError": false
+  }
+}
+```
+
+## Annotations
+
+The tool's MCP behaviour hints, as emitted in `tools/list` (advisory display metadata — see [the annotations contract](/mcp/overview#tool-annotations)):
+
+| `readOnlyHint` | `destructiveHint` | `idempotentHint` | `openWorldHint` |
+|---|---|---|---|
+| `true` | `false` | `true` | `false` |
+
+Despite the drain wording, a pure scoped read: the watermark is the client-supplied `last_seen`, and nothing server-side is marked read or advanced — replaying the same `last_seen` returns the same items.
+
+## Related
+
+- [place_beacon](/mcp/tools/place-beacon) to attract diffs into your inbox.
+- [Gossip propagation](/concepts/gossip-propagation) for how diffs reach you.

@@ -1,0 +1,45 @@
+---
+title: Recipes
+description: Short, goal-first guides for common HyphaeDB tasks — each one a concrete objective, the steps to reach it, and where to go deeper.
+---
+
+Recipes are task-oriented: each one starts with a **goal you can name** ("connect HyphaeDB to Claude
+Code", "erase an agent's data"), gives the shortest path to it, and links out to the reference pages for
+the details. They assume you've done the [quickstart](/quickstart) — a server running and an API key in
+hand.
+
+If you're looking to *understand* a subsystem rather than *do* a task, start with
+[Core concepts](/concepts/gossip-propagation) or the [Operations](/operations/docker-compose) pages
+instead; recipes are the how-to layer on top of those.
+
+## The cookbook
+
+<CardGroup cols={2}>
+  <Card title="Connect to Claude Code (MCP)" icon="robot" href="/recipes/mcp-claude-code">
+    Wire HyphaeDB in as an MCP memory server an agent calls as tools.
+  </Card>
+  <Card title="Route knowledge with beacons" icon="location-dot" href="/recipes/route-with-beacons">
+    Give an agent standing interests so relevant memories gossip to it.
+  </Card>
+  <Card title="Tune how far a memory travels" icon="bolt" href="/recipes/tune-propagation-distance">
+    Use salience and cell type to control propagation reach.
+  </Card>
+  <Card title="Watch a memory propagate" icon="satellite-dish" href="/recipes/watch-propagation">
+    Stream propagation live from the Topology Observatory.
+  </Card>
+  <Card title="Erase data with a certificate" icon="trash" href="/recipes/erase-with-certificate">
+    Run a compliant, audited erasure and keep the receipt.
+  </Card>
+</CardGroup>
+
+## The recipe format
+
+Every recipe follows the same shape, so you can scan it fast:
+
+- **Goal** — one sentence: what you'll have when you're done.
+- **Prerequisites** — what must already be true (usually: server up, a key, sometimes an admin key).
+- **Steps** — the shortest correct path, copy-pasteable.
+- **See also** — the reference pages for the full surface.
+
+Have a task that isn't here yet? The [SDK guides](/sdks/python), the [MCP tools](/mcp/overview), and the
+[Operations](/operations/docker-compose) reference cover the full surface these recipes draw from.

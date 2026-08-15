@@ -1,0 +1,70 @@
+---
+title: "Recipe: watch a memory propagate"
+description: Stream propagation hop-by-hop from the Topology Observatory, or pull a snapshot of the recent window, to see exactly where a memory went and why it stopped.
+---
+
+**Goal.** See propagation happen — the hops a diff took, the energy it spent, and where it stopped — as
+an operator, live or after the fact.
+
+**Prerequisites.**
+- The Observatory enabled (on by default in the `dev` profile; opt in for `production`). See
+  [Topology Observatory](/operations/topology-observatory).
+- An **operator session** — these are `/admin/api` endpoints behind the console OIDC login, not the
+  `x-hyphae-key` data key. See the [admin control plane](/operations/admin-control-plane) for logging in
+  and obtaining the session cookie.
+
+## Two ways to look
+
+The Observatory serves the same tenant-scoped, content-free event stream two ways: a **live WebSocket**
+that replays the recent window then tails, and a **JSON snapshot** for a one-shot pull.
+
+<Note>
+**No curl required.** In a console build (the default-off `embed-console` packaging feature), the
+Mycelium **Observatory screen** at `/admin` renders this same stream visually — open it and watch the
+hops arrive live instead of tailing JSON by hand.
+</Note>
+
+<Steps>
+  <Step title="Pull a snapshot">
+    The simplest look — the most recent events as JSON, newest-last:
+
+    ```bash
+    curl -s --cookie "hyphae_admin_session=<your-session>" \
+      "https://console.example/admin/api/observatory/events?limit=50"
+    ```
+
+    Each event carries `diff_id`, `from_node` / `to_node`, `hop_index`, `energy_before` / `energy_after`,
+    `outcome` (`delivered` / `deduped` / `pruned` / `exhausted`), and provenance — never the memory's
+    content. Group by `diff_id` to reconstruct one memory's whole journey.
+  </Step>
+
+  <Step title="Tail it live">
+    Open the WebSocket to replay the buffered window and then stream new propagations as they happen:
+
+    ```bash
+    websocat -H "Cookie: hyphae_admin_session=<your-session>" \
+      "wss://console.example/admin/api/observatory/stream"
+    ```
+
+    Pass `?since=<rfc3339>` to replay only events after a watermark. A `{"resync":true}` frame means the
+    tail fell behind — reconnect with `?since=<last-seen-ts>` to close the gap.
+  </Step>
+
+  <Step title="Follow one memory">
+    Store something with a known, distinctive content, note its `diff_id` from the first event, and
+    filter the stream on it — you'll see it spend `energy_before → energy_after` down each hop until an
+    `exhausted` (ran out of budget) or `pruned` (failed a relevance gate) outcome ends its walk.
+  </Step>
+</Steps>
+
+<Note>
+A **project admin** sees only its own tenant's events, on both the replay and the live tail — never
+another tenant's, and never a derived id. A **service admin** sees all tenants. This is enforced
+server-side, not a display filter.
+</Note>
+
+## See also
+
+- [Topology Observatory](/operations/topology-observatory) — the full event shape, config, and metrics.
+- [Tune how far a memory travels](/recipes/tune-propagation-distance) — change what you'll see here.
+- [The energy model](/concepts/energy-model) — what `energy_before`/`energy_after` mean.

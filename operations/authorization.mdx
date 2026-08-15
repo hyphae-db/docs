@@ -1,0 +1,115 @@
+---
+title: Authorization
+description: How callers authenticate — a data-plane API key or a console OIDC session — and how HyphaeDB enforces RBAC inside storage query scoping, so out-of-scope data is unreachable rather than filtered after the fact.
+---
+
+Authentication tells HyphaeDB *who* a caller is; authorization decides *what* that caller may read
+and write. The headline decision: authorization is enforced **inside storage query scoping**, not as
+an after-the-fact request filter. A node outside a caller's scope is **unreachable** — never traversed
+or returned by the index — rather than fetched and then dropped.
+
+This matters because the read path queries a single global index. Filtering global results after the
+fact leaks (the caller learns out-of-scope nodes exist and gets fewer in-scope results) and is fragile
+(every new read path must remember to re-apply the filter). Making scope a property of the *query*
+fixes both: the index never traverses out-of-scope nodes, and the next in-scope neighbors are returned
+instead.
+
+## Authentication: two identities
+
+Authorization needs a `Principal` to reason about; authentication is how a request acquires one.
+HyphaeDB has two authentication paths, one per plane:
+
+- **Data plane (`/v1`)** — an agent presents an API key (`x-hyphae-key: hyk_...`) on every gRPC / REST /
+  WebSocket call. The key resolves to a registered `Principal` carrying the agent's roles and tenant.
+  That principal — not any client-supplied field — is the source of the agent's identity on every write
+  (see [write-scope binding](#write-scope-binding)).
+- **Control plane (`/admin/api`)** — an operator logs in through an **OIDC Authorization-Code** flow that
+  establishes a server-side session (an opaque `HttpOnly` cookie). The federated subject resolves to a
+  local `Principal` with an admin role. See the [Admin control plane](/operations/admin-control-plane)
+  for the login sequence and session handling.
+
+Both paths run through the same **pluggable-authn** seam: a `CredentialProvider` verifies the presented
+credential — an API-key hash, or an OIDC ID token checked against the issuer's JWKS — and yields the
+authenticated `Principal`. New credential types plug in behind that trait without touching the authz
+model below.
+
+<Note>
+**The registered-principal gate.** Whether an unregistered request is admitted at all is a
+deployment-profile control. In `production`, `require_registered_principal` is enforced — every request
+must resolve to a registered principal or it is rejected. In `dev`, an unregistered caller may be minted
+a fixed, empty-roles `dev-unregistered` principal, which under deny-by-default can then do nothing until
+a role is granted. See [Deployment](/operations/deployment).
+</Note>
+
+## The authorizer
+
+The decision point is a single, stateless function:
+
+```text
+Authorizer::authorize(principal, action) -> AccessScope
+```
+
+It is **deny-by-default**: if no role binding in the principal permits the action, it returns
+`Forbidden`. Otherwise it returns the narrowest `AccessScope` the matching bindings grant — a tenant,
+a set of allowed projects, and an agent visibility.
+
+| Role | Permits | Resulting visibility |
+|------|---------|----------------------|
+| Reader | Read actions (recall, query, get inbox, get node, get scene, list scenes, list beacons) | Per the binding's project and agent scope. |
+| Writer | All Reader actions plus store, consolidate, place beacon | Same reads; writes bound to the caller's own agent. |
+| Project admin | Writer actions within its project, plus registering agents in its tenant/project | All agents in that project. |
+| Service admin | All actions, including cross-tenant issuance and setting trust | All agents in any tenant. |
+
+## Scoped reads
+
+The application-facing reads take an `AccessScope` and compile it into a **mandatory** SQL `WHERE`
+predicate served by indexes:
+
+- `nearest_neighbors_scoped` — returns the next in-scope neighbors, not global top-k minus the
+  out-of-scope ones.
+- `get_node_scoped` — returns a node only if it is in scope; otherwise `None`, indistinguishable from
+  "does not exist" so callers cannot probe for out-of-scope IDs.
+- `get_inbox_scoped` — an agent reads its own inbox unless its visibility permits cross-agent reads.
+- `list_scenes_scoped` — scenes within the caller's tenant and allowed projects.
+
+The unscoped variants remain on the storage trait but are internal and rehydration-only — reachable
+only behind an internal capability marker that protocol handlers cannot construct, so no application
+path reaches an unscoped read.
+
+## Write-scope binding
+
+On every write — `store` and gossip ingress — the persisted `source_agent` and `tenant_id` are taken
+from the **authenticated principal**, never from client-supplied body fields. A body that claims a
+different `source_agent` or `tenant_id` is rejected with `Forbidden` rather than silently corrected, so
+the mismatch is auditable.
+
+This is what makes provenance unforgeable: a client cannot author as another agent or write into
+another tenant. See [/concepts/trust-and-provenance](/concepts/trust-and-provenance) for how
+provenance is then used downstream.
+
+<Note>
+Authorization is a hard allow/deny plus scope. Trust scoring is a separate, *soft* signal — it
+down-weights, it does not deny. The two work together: authorization decides reachability, trust
+decides ranking within what is reachable.
+</Note>
+
+## The tenant predicate
+
+Every scoped read AND-s `tenant_id = scope.tenant_id` unconditionally — even in V1, where every
+principal is minted into a single default tenant, so the predicate is a no-op partition today. Because
+the field and predicate exist from day one, turning on hard tenant isolation later is a configuration
+and issuance change, not a schema or API redesign.
+
+## Admin operations
+
+Admin actions — registering agents, setting trust — require an admin scope. A project admin is capped
+to its own tenant and project and cannot mint a service admin.
+
+For where credentials come from, see [/operations/configuration](/operations/configuration) (the
+bootstrap admin) and [/quickstart](/quickstart) (issuing agent credentials).
+
+## Source
+
+This page is a teaching restatement of the
+[authorization spec](https://github.com/hyphae-db/hyphae-core/blob/main/specs/authorization.md);
+that spec is authoritative for any detail here.

@@ -1,0 +1,78 @@
+---
+title: "Recipe: connect HyphaeDB to Claude Code"
+description: Wire HyphaeDB in as an MCP server so Claude Code (or any MCP host) can store and recall memory as tool calls.
+---
+
+**Goal.** Give an MCP host — Claude Code, Cursor, Cline — HyphaeDB as agent memory, so the agent calls
+`store` / `recall` / `inbox` as tools instead of speaking gRPC.
+
+**Prerequisites.**
+- A reachable PostgreSQL and the `hyphae-server` binary (or its container). See the
+  [quickstart](/quickstart) for `DATABASE_URL` and bootstrap.
+- An agent API key (`hyk_...`) — this is the agent's identity for every tool call in the session.
+
+## How it works
+
+In MCP-stdio mode the server is a **per-agent subprocess**: the MCP host launches it, they speak
+JSON-RPC 2.0 over stdin/stdout, and it binds no ports. Identity is fixed for the life of the process —
+the `HYPHAE_API_KEY` launch token is resolved once into an authenticated principal and reused for every
+`tools/call`, so there is no per-call identity argument to get wrong. See the
+[MCP tools overview](/mcp/overview).
+
+## Steps
+
+<Steps>
+  <Step title="Confirm the stdio mode runs">
+    The server enters MCP-stdio mode with the `mcp-stdio` subcommand (equivalently `--stdio` or
+    `HYPHAEDB_MCP_STDIO=1`). It needs `DATABASE_URL` and the launch token in its environment:
+
+    ```bash
+    DATABASE_URL="postgres://postgres:hyphae@localhost:5432/hyphae" \
+    HYPHAE_API_KEY="hyk_your_agent_key" \
+    hyphae-server mcp-stdio
+    ```
+
+    It reads JSON-RPC on stdin and writes on stdout — you won't see a prompt; that's expected.
+  </Step>
+
+  <Step title="Register it with the MCP host">
+    Point the host at that command. For Claude Code, add an MCP server whose `command` is the binary in
+    `mcp-stdio` mode and whose `env` carries the two variables — for example in a project `.mcp.json`:
+
+    ```json
+    {
+      "mcpServers": {
+        "hyphae": {
+          "command": "hyphae-server",
+          "args": ["mcp-stdio"],
+          "env": {
+            "DATABASE_URL": "postgres://postgres:hyphae@localhost:5432/hyphae",
+            "HYPHAE_API_KEY": "hyk_your_agent_key"
+          }
+        }
+      }
+    }
+    ```
+
+    Each agent that should have a distinct identity gets its **own** key in its own server entry — the
+    token is the identity.
+  </Step>
+
+  <Step title="Use it">
+    The host now sees HyphaeDB's [11 tools](/mcp/overview) (`store`, `recall`, `query`, `start_session`,
+    `place_beacon`, `inbox`, `pull_inbox`, and the rest). Ask the agent to store a memory and recall it;
+    the server stamps authorship from the launch token, never from the tool arguments.
+  </Step>
+</Steps>
+
+<Note>
+Over MCP, `recall` and `query` return `{node_id, distance}` pairs, **not** hydrated content — read a
+cell's content over a hydrating surface (the [REST API](/api-reference/overview)). This keeps the MCP
+tool responses small and id-based.
+</Note>
+
+## See also
+
+- [MCP tools overview](/mcp/overview) — the 11 tools, transports, and the output envelope.
+- [Authorization](/operations/authorization) — how the launch token becomes an authenticated principal.
+- [Quickstart](/quickstart) — bringing the server and a key up from scratch.

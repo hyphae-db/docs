@@ -1,0 +1,113 @@
+---
+title: Run with Docker Compose
+description: Stand up a local HyphaeDB mesh — hyphae-server, PostgreSQL with pgvector, and an optional embedding sidecar — with a single compose file.
+---
+
+Docker Compose is the fastest way to run a complete HyphaeDB stack on one machine. The
+`deploy/docker-compose.yml` file stands up a single `hyphae-server` container, an external
+PostgreSQL instance with the `pgvector` extension, and an optional Text Embeddings Inference
+(TEI) sidecar, wired together with a named `model-cache` volume.
+
+The server holds the HNSW mesh in RAM and rebuilds it from PostgreSQL on boot; PostgreSQL is the
+system of record. For the model behind this topology, see [/operations/deployment-operations](/operations/deployment-operations).
+
+## What the stack contains
+
+| Service | Role |
+|---------|------|
+| `hyphae-server` | The process that *is* the mesh — gRPC, REST/WebSocket, and (optionally) MCP. Reaches PostgreSQL via `DATABASE_URL`. |
+| `postgres` | The system of record (`pgvector` enabled). Holds nodes, edges, deliveries, scenes, and sessions. |
+| `tei` (optional) | A co-located embedding server, enabled with `--profile tei` plus `HYPHAEDB_EMBEDDING_PROVIDER=tei`. |
+| `model-cache` (volume) | A named volume mounted at the embedding cache path so model weights survive restarts and are not re-downloaded. |
+| `snapshot-cache` (volume) | Mounted at `/var/lib/hyphae/snapshots` (`HYPHAEDB_SNAPSHOT_DIR`). The mesh checkpoints here every 15 minutes and at graceful shutdown, so a restart replays only a small delta instead of rescanning the whole corpus. See [/operations/durability-and-dr](/operations/durability-and-dr). |
+
+## Prerequisites
+
+- Docker and the Docker Compose plugin.
+- Roughly 2 GB of free memory for a small mesh (the embedding model alone is ~400 MB–2 GB). See the
+  capacity model in [/operations/deployment-operations](/operations/deployment-operations).
+
+## Bring the stack up
+
+<Steps>
+  <Step title="Clone the repository">
+    The compose file ships under `deploy/`.
+
+    ```bash
+    git clone https://github.com/hyphae-db/hyphae-core.git
+    cd hyphae-core
+    ```
+  </Step>
+  <Step title="Set the bootstrap admin">
+    On an empty registry the server needs `HYPHAEDB_BOOTSTRAP_ADMIN` to create the first admin, who
+    can then issue credentials for other agents. Pass a name (a key is minted and logged once), or
+    `name:hyk_<kid>_<secret>` to pin the key — a supplied key must be `hyk_<kid>_<secret>`-shaped or
+    the server refuses to boot.
+
+    ```bash
+    export HYPHAEDB_BOOTSTRAP_ADMIN='ops-admin'
+    ```
+
+    See [/operations/configuration](/operations/configuration) for the full environment surface and
+    [/quickstart](/quickstart) for issuing agent credentials.
+  </Step>
+  <Step title="Start the services">
+    ```bash
+    docker compose -f deploy/docker-compose.yml up -d
+    ```
+
+    The server connects to PostgreSQL over `DATABASE_URL`, runs migrations, warms the embedding
+    cache, rehydrates the mesh, and begins serving.
+  </Step>
+  <Step title="Verify readiness">
+    The server exposes liveness and readiness probes on the REST port. Readiness returns ready only
+    once the mesh has finished rehydrating.
+
+    ```bash
+    curl -s localhost:8080/healthz   # liveness: 200 {"status":"ok"} as soon as the process is up
+    curl -s localhost:8080/readyz    # readiness: 200 once every probe (storage, embedding, audit, graph) is Up
+    curl -s localhost:8080/metrics   # Prometheus scrape (HYPHAEDB_TELEMETRY_MODE=prometheus, the compose default)
+    ```
+
+    While the mesh is still loading, `/readyz` returns 503 and its JSON body names the failing
+    probe (`"graph": "loading"`) — the body is the first thing to read when the stack won't go
+    ready.
+  </Step>
+</Steps>
+
+## Choosing an embedding mode
+
+The compose stack supports the embedding-packaging modes without any application change. Pick one
+with `HYPHAEDB_EMBEDDING_PROVIDER`:
+
+| Mode | Setting | When to use |
+|------|---------|-------------|
+| Mock (compose default) | `mock` | Local development and end-to-end tests — an in-process engine that needs no weights, so `docker compose up` works with zero extra setup. |
+| TEI sidecar | `--profile tei` plus `HYPHAEDB_EMBEDDING_PROVIDER=tei HYPHAEDB_EMBEDDING_BASE_URL=http://tei:80` | Real embeddings with production throughput. The sidecar has a healthcheck and the server retries its endpoint during TEI's cold-start weight download. |
+| Candle (in-process) | `candle` with a warmed `model-cache` volume | In-process real embeddings — the engine is compiled into the default image; the first boot downloads the weights (~600MB) unless the cache volume is already warm. |
+
+<Note>
+The `model-cache` volume is mounted at the embedding cache path so the first run pays the model
+download once. Later restarts read a cache hit and never re-download.
+</Note>
+
+## Default ports
+
+| Binding | Default | Environment variable |
+|---------|---------|----------------------|
+| gRPC | `0.0.0.0:50051` | `HYPHAEDB_GRPC_BIND` |
+| REST / WebSocket / `/metrics` | `0.0.0.0:8080` | `HYPHAEDB_REST_BIND` |
+
+## Next steps
+
+- Tune the server with [/operations/configuration](/operations/configuration).
+- Move to Kubernetes or a production posture with [/operations/deployment](/operations/deployment).
+- Connect a client from [/sdks/python](/sdks/python), [/sdks/typescript](/sdks/typescript),
+  [/sdks/go](/sdks/go), or [/sdks/rust](/sdks/rust).
+
+## Source
+
+This guide follows the deployment model and operational artifacts specified in the
+[deployment-operations spec](https://github.com/hyphae-db/hyphae-core/blob/main/specs/deployment-operations.md)
+and the staged rollout in the
+[build-sequence spec](https://github.com/hyphae-db/hyphae-core/blob/main/specs/11-build-sequence.md).

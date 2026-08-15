@@ -1,0 +1,111 @@
+---
+title: Extending HyphaeDB
+description: How HyphaeDB is extended today — a set of trait seams, each with a concrete implementation chosen at startup, so you can swap the embedder, storage, auth, secrets, rate limiter, and more without forking the core.
+---
+
+<Note>
+**How extensibility works today.** HyphaeDB is extended through **trait seams** — the core depends on
+an interface, and a concrete implementation is selected at startup — and through the typed
+**`PluginRegistry`** over those seams: config-driven selection per extension point
+(`[plugins.<point>].use`), per-plugin readiness probes, a boot audit record of the active set, and
+`hyphae.plugin.*` metrics. Extension points remain compile-time and config-time; what stays future
+(dynamic loading, WASM, sidecars, a marketplace) is noted at the end.
+</Note>
+
+HyphaeDB's core logic — the gossip walk, the energy model, layer promotion — is written against
+**interfaces**, not concrete backends. Each interface is a Rust trait with `Send + Sync` bounds; the
+server picks one implementation of each at boot and wires it in. This is what lets the same engine run
+against Postgres or an in-memory double, embed with a local model or a hosted API, and rate-limit in one
+process or across a cluster — without touching the code that gossips knowledge.
+
+## The showcase: swappable embedders
+
+The clearest example is embedding. The `EmbeddingEngine` trait has **five** shipped implementations, and
+which one runs is a configuration choice:
+
+| Backend | What it is |
+|---------|-----------|
+| `TeiEngine` | A Text-Embeddings-Inference sidecar (the recommended production default). |
+| `OpenAiEngine` | A hosted OpenAI-compatible embeddings API. |
+| `HttpEngine` | Any HTTP embeddings endpoint that speaks the expected shape. |
+| `CandleEngine` | An in-process local model, no sidecar (compiled into default builds; a `--no-default-features` build excludes it). |
+| `MockEngine` | A deterministic fake for tests and offline development. |
+
+Point the config at a different backend and the entire mesh embeds differently — nothing in the gossip
+or promotion code changes, because it only ever sees `EmbeddingEngine`.
+
+## The seam catalog
+
+The interfaces you can implement or select, and what each abstracts:
+
+| Seam | Abstracts | Shipped implementations |
+|------|-----------|-------------------------|
+| `EmbeddingEngine` | Turning content into vectors | TEI, OpenAI, HTTP, Candle, Mock |
+| `StorageEngine` | The persistence backend (the V1→V2 seam) | PostgreSQL + pgvector (V1); a native engine is planned behind the same trait |
+| `CredentialProvider` | Verifying a presented credential | API-key, OIDC (JWT/JWKS) — see [pluggable auth](/operations/authorization) |
+| `SecretsManager` | Resolving secret references | env/file (`env:` / `file:` / `raw:`); Vault / AWS KMS / GCP KMS are config-typed, deferred |
+| `RateLimiter` | Admission control | in-process token bucket; a distributed (Postgres/Redis) backend behind the same trait |
+| `AuditSink` / `AuditEmitter` | Writing the audit chain | the Postgres hash-chained sink, and a no-op — see [audit log](/operations/audit-log) |
+| `PropagationObserver` | Observing the gossip walk | the [Topology Observatory](/operations/topology-observatory) tap, and a zero-overhead no-op default |
+| `ConsolidationHook` | Reacting to scene consolidation | a channel-backed worker hook, and a no-op |
+
+Two properties fall out of this design and are worth calling out, because they're the reason the seams
+stay clean:
+
+- **Zero-overhead defaults.** A seam that isn't wired uses a no-op (the `PropagationObserver` default, for
+  instance, makes the gossip walk byte-for-byte identical to having no observer at all). You never pay for
+  an extension point you don't use.
+- **No dependency inversion.** Seams that a lower crate must emit into — like the mesh emitting
+  `TrustChange` audit events — are defined as narrow traits in `hyphae-core`, so `hyphae-mesh` never takes
+  a dependency on `hyphae-server`. The interface lives below both.
+
+## Adding an implementation
+
+The shape is the same for every seam:
+
+<Steps>
+  <Step title="Implement the trait">
+    Write a type that implements the seam's trait (e.g. `EmbeddingEngine`). Its methods are the only
+    surface the core will ever call.
+  </Step>
+  <Step title="Construct it at boot">
+    The server builds each backend from configuration in one place (the `build_*` constructors the
+    `build_server` path calls). Add your backend as a variant the builder can select.
+  </Step>
+  <Step title="Select it by config">
+    Choose the implementation with a configuration value (or a Cargo feature for compile-time-optional
+    backends, like the NLI contradiction classifier). A selected backend the build did not compile is
+    refused at boot by the wiring preflight (`hyphae-server check` verifies it without booting). The
+    rest of the system depends only on the trait, so nothing else changes.
+  </Step>
+</Steps>
+
+Because the whole system is written against the trait, a new backend is additive — it can't change how
+gossip, promotion, or the energy model behave.
+
+## The plugin registry
+
+The seams are managed by a typed `PluginRegistry`. You select a plugin per extension point in
+config — `[plugins.<point>].use = "<name>"` — and the server resolves the full set **once at
+boot**: an unknown plugin name is a fail-closed boot error, never a silent fallback. Each selected
+plugin gets its own `plugin.<point>` readiness probe on `/readyz`, the resolved extension-point →
+plugin set is recorded as a synchronous `PluginSelected` [audit row](/operations/audit-log) — a
+durable record of what code was active at boot — and the `hyphae.plugin.*`
+[metrics](/operations/observability) cover selection, init duration and failures, and health.
+Because resolution happens once at boot, the registry adds zero hot-path overhead, and the
+Production deployment profile additionally gates which selections may boot.
+
+## What isn't here (yet)
+
+The framework is **static**: implementations are compiled in and resolved at startup. There is
+deliberately no dynamic plugin system — no runtime discovery, no third-party dynamic libraries, no
+WASM or sidecar isolation, no plugin marketplace. That keeps the security surface small and the
+build reproducible. Dynamic loading, WASM plugins, sidecar processes, and a marketplace are
+proposed as a separate ecosystem phase; until then, the registry and the seams above are the
+supported way to extend HyphaeDB, and they cover the backends most deployments need to swap.
+
+## See also
+
+- [Authorization](/operations/authorization) — the `CredentialProvider` auth seam in practice.
+- [Observability & metrics](/operations/observability) — the exporter seam and the metrics contract.
+- [Topology Observatory](/operations/topology-observatory) — the `PropagationObserver` seam, built out.

@@ -1,0 +1,107 @@
+---
+title: Go SDK
+description: The Go SDK is planned. Until it ships, use the HyphaeDB gRPC service directly from Go with a generated client.
+---
+
+<Warning>
+The Go SDK is planned and not yet released. There is no `hyphaedb` Go package to install today, and
+the high-level API shown below is a forward-looking preview that may change before release. If you
+are building in Go now, use the gRPC service directly — see [Use the gRPC service today](#use-the-grpc-service-today).
+</Warning>
+
+A first-class Go SDK is on the roadmap. It will mirror the
+[Python](/sdks/python), [TypeScript](/sdks/typescript), and [Rust](/sdks/rust) clients: an async,
+gRPC-only smart client with a warm local read cache, identity bound once at connect from your
+`hyk_...` key, and a live reconnecting inbox.
+
+## Planned API (preview)
+
+The intended high-level surface mirrors the other SDKs. This is a design preview, not a released
+API — names and signatures are not final.
+
+```go
+// PREVIEW — not yet available. Shapes may change before release.
+client, err := hyphaedb.Connect(ctx, "localhost:50051", "hyk_your_key_here")
+
+nodeID, err := client.Store(ctx, hyphaedb.CellInput{
+    CellType: hyphaedb.CellTypeDecision,
+    Content:  "We ship on Friday",
+})
+
+hits, err := client.Recall(ctx, hyphaedb.RecallQuery{Text: "ship", K: 5})
+
+session, err := client.StartSession(ctx, "my-agent")
+
+beaconID, err := client.PlaceBeacon(ctx, "interest text")
+
+for item := range client.Inbox(ctx) { // live, deduped gossip deliveries
+    _ = item
+}
+```
+
+When the SDK is released, this page will document install (the `go get` line will be added here once
+the module is published), connect and authenticate, a runnable quickstart, and the full method
+reference — matching the structure of the other SDK pages.
+
+## Use the gRPC service today
+
+HyphaeDB speaks gRPC, so you can drive it from Go right now by generating a client from the protobuf
+definitions and authenticating with the same metadata header the other SDKs use. See the
+[gRPC overview](/grpc/overview) for the service contract.
+
+<Steps>
+  <Step title="Generate a Go client from the protobuf">
+    Generate Go bindings from `proto/hyphaedb/v1/` with `protoc` and the Go plugins. This produces
+    the message types and the `Hyphae` service client stub.
+
+    ```bash
+    protoc \
+      --go_out=. --go_opt=paths=source_relative \
+      --go-grpc_out=. --go-grpc_opt=paths=source_relative \
+      -I proto \
+      proto/hyphaedb/v1/*.proto
+    ```
+  </Step>
+  <Step title="Dial the server">
+    Open a gRPC connection to the server's `host:port` and construct the generated client.
+
+    ```go
+    conn, err := grpc.NewClient(
+        "localhost:50051",
+        grpc.WithTransportCredentials(insecure.NewCredentials()),
+    )
+    if err != nil {
+        // handle error
+    }
+    defer conn.Close()
+
+    client := hyphaedbv1.NewHyphaeClient(conn)
+    ```
+  </Step>
+  <Step title="Authenticate every call with x-hyphae-key">
+    Send your full `hyk_...` key as the `x-hyphae-key` metadata header on every RPC. The server reads
+    your identity from the key — never pass `source_agent` yourself.
+
+    ```go
+    ctx := metadata.AppendToOutgoingContext(
+        context.Background(),
+        "x-hyphae-key", "hyk_your_key_here",
+    )
+
+    resp, err := client.Store(ctx, &hyphaedbv1.StoreRequest{
+        Content:  "We ship on Friday",
+        CellType: hyphaedbv1.CellType_CELL_DECISION,
+    })
+    ```
+  </Step>
+</Steps>
+
+<Note>
+Using the generated client directly means you handle version negotiation, the cache-first recall
+path, inbox dedupe, and reconnect/replay yourself — the conveniences the smart-client SDKs provide.
+The `Info` RPC returns the server's version and capabilities if you want to negotiate compatibility
+manually. See [API versioning](/operations/api-versioning) and
+[gossip propagation](/concepts/gossip-propagation) for what those features do.
+</Note>
+
+See [the quickstart](/quickstart) for how to obtain a `hyk_...` credential.

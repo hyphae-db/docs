@@ -1,0 +1,59 @@
+---
+title: "Introduction"
+description: "HyphaeDB is agent-native memory infrastructure: a database where stored knowledge propagates to the agents that need it instead of waiting to be queried."
+---
+
+HyphaeDB is agent-native memory infrastructure — a database, written in Rust, built for teams of AI agents that share what they learn. Agents connect as thin clients, store memories, and recall them by meaning. What makes HyphaeDB different is what happens to a memory *after* you store it.
+
+## The thesis in two minutes
+
+Most databases are pull-based: knowledge sits still until a query asks for it. The agent that needs a fact has to know the fact exists, and know to ask. In a multi-agent system that is the wrong default — the agent who would benefit from a lesson is usually not the agent who learned it.
+
+HyphaeDB inverts that. When you store a memory, the server turns it into a **memory diff** and releases it into a topology — a [gossip protocol](/concepts/gossip-propagation) running over an [HNSW graph](/concepts/hnsw-mesh). The diff then *propagates*, hop by hop, to the agent nodes it is relevant to. You do not have to know who needs a fact for it to reach them; the mesh routes it for you.
+
+Propagation is bounded so it terminates instead of flooding. Each diff carries an [energy budget](/concepts/energy-model): every hop costs energy, the cost depends on how strong the edge is, and when a diff can no longer afford to cross any remaining edge it stops. More salient knowledge — a decision, a constraint, a contradiction — is seeded with more energy and travels farther than a routine update.
+
+The result is knowledge that finds its audience:
+
+- **Store, don't broadcast.** You write a memory once. The mesh decides where it should flow.
+- **Recall by meaning.** A vector search over the same HNSW graph that carries gossip returns the memories closest to your query.
+- **Watch your inbox.** Each agent has a live inbox; diffs that propagate to your node arrive there, de-duplicated and replayable after a reconnect.
+
+A few invariants make this trustworthy. A diff's [origin](/concepts/trust-and-provenance) is immutable, so you can always tell where a piece of knowledge came from. Identity is taken from your authenticated credential, never from the request body, so an agent can never claim to be another. And widely-delivered knowledge can be [promoted](/concepts/layer-promotion) up a layer hierarchy from working memory toward shared, long-lived memory.
+
+## How you connect
+
+HyphaeDB speaks four protocol surfaces over one application core, so you pick the surface that fits your client:
+
+- **gRPC** — the primary surface: eleven unary RPCs plus a bidirectional inbox stream. See [the gRPC overview](/grpc/overview).
+- **MCP** — the Model Context Protocol surface for agents, exposed over stdio for Claude Code and other MCP hosts. See [the MCP tools overview](/mcp/overview).
+- **REST** — an HTTP fallback for clients without a gRPC stack. See [the API reference](/api-reference/overview).
+- **A2A** — opt-in: agents on Agent2Agent platforms reach the same memory through the standard A2A protocol. See [the A2A overview](/a2a/overview).
+
+For most use cases you do not call these directly. Use a client SDK: [Python](/sdks/python) and [TypeScript](/sdks/typescript) and [Rust](/sdks/rust) ship today, with [Go](/sdks/go) planned. Each SDK is a thin smart client — it keeps a warm local read cache and a live inbox, and holds no mesh logic of its own.
+
+## Where to go next
+
+<Columns cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Bring up the server with Docker Compose, obtain a credential, then store and recall your first memory in under five minutes.
+  </Card>
+  <Card title="Propagation in five minutes" icon="share-nodes" href="/propagation-quickstart">
+    The thesis, running: watch a memory travel from one agent to another with no query in between.
+  </Card>
+  <Card title="Core concepts" icon="diagram-project" href="/concepts/gossip-propagation">
+    How gossip propagation, the energy model, and the HNSW mesh fit together.
+  </Card>
+  <Card title="Client SDKs" icon="code" href="/sdks/python">
+    Install a language SDK and call the high-level `store` / `recall` / `inbox` API.
+  </Card>
+  <Card title="MCP tools" icon="robot" href="/mcp/overview">
+    The Model Context Protocol tools that let an agent use HyphaeDB as memory.
+  </Card>
+  <Card title="API reference" icon="book" href="/api-reference/overview">
+    The REST surface and its conventions, plus the generated endpoint reference.
+  </Card>
+  <Card title="Operations" icon="server" href="/operations/docker-compose">
+    Run, configure, secure, and operate a production deployment.
+  </Card>
+</Columns>

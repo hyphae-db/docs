@@ -1,0 +1,70 @@
+---
+title: "start_session"
+description: "Open an agent working session in a project over MCP; returns the session id."
+---
+
+Open an agent working session in a project. The server returns the new session id, which you pass to [end_session](/mcp/tools/end-session) when the work is done.
+
+Dispatches to the `start_session` internal service method.
+
+## Parameters
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `project_id` | string | Yes | — | The project to open a session in. |
+
+The session is bound to the authenticated principal — there is no agent-id parameter.
+
+## Returns
+
+```json
+{ "session_id": "<uuid>" }
+```
+
+Returned as the `structuredContent` payload.
+
+## Example
+
+Request:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "start_session",
+    "arguments": { "project_id": "hyphaedb" }
+  }
+}
+```
+
+Response:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": [
+      { "type": "text", "text": "{\"session_id\":\"3f2504e0-4f89-11d3-9a0c-0305e82c3301\"}" }
+    ],
+    "structuredContent": { "session_id": "3f2504e0-4f89-11d3-9a0c-0305e82c3301" },
+    "isError": false
+  }
+}
+```
+
+## Annotations
+
+The tool's MCP behaviour hints, as emitted in `tools/list` (advisory display metadata — see [the annotations contract](/mcp/overview#tool-annotations)):
+
+| `readOnlyHint` | `destructiveHint` | `idempotentHint` | `openWorldHint` |
+|---|---|---|---|
+| `false` | `false` | `false` | `false` |
+
+Mints a fresh session id per call — additive, not idempotent.
+
+## Related
+
+- [end_session](/mcp/tools/end-session) to close the session.

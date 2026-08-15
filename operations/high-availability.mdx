@@ -1,0 +1,126 @@
+---
+title: High availability
+description: How HyphaeDB survives process and host failure — active-passive, single-writer, fenced failover with a Postgres-backed lease and bounded RPO and RTO.
+---
+
+<Note>
+**Status: built (V1).** Enable with `HYPHAEDB_HA_ENABLED=1` on both instances (the Helm chart
+sets it automatically when `replicaCount > 1`). One instance wins the lease and serves; the other
+runs as a **wait-then-boot standby** — it holds no mesh, issues zero PostgreSQL writes, answers
+`/healthz` 200 and `/readyz` 503, and promotes automatically (running the ordinary primary boot)
+when the primary dies or drains. A planned drain hands over within ~one poll interval; a crash
+failover waits out the fence-before-promote margin (~8s default) plus the promotion boot. Watch
+`hyphae_health_role` (0 standby, 1 primary, 2 fenced) and see the failover runbook in
+`deploy/runbooks/ha-failover.md`.
+</Note>
+
+Because the HyphaeDB server *is* the mesh, a single process death is a full outage. High availability
+makes the single logical mesh survive process and host failure with a bounded recovery time, without
+reintroducing the multi-mesh consensus problem the architecture exists to avoid.
+
+The decision: **active-passive, single-writer, fenced failover.** Exactly one **primary** owns the
+authoritative in-memory mesh at any instant. A **standby** holds no live mesh — as built it holds
+nothing at all (wait-then-boot: no storage pool, no embedder, no mesh — which is what makes its
+zero-write guarantee structural) — and is promoted **only after the old primary is fenced**.
+Promotion re-runs the ordinary primary boot, so its duration includes pool connect, embedder init,
+and rehydration. Two honest caveats about the rehydration term: the shipped Kubernetes manifests
+mount an `emptyDir` snapshot cache, which bounds **same-pod restarts** but not a different pod's
+promotion (that pod's cache is empty, so it pays the full PostgreSQL scan) — run a StatefulSet
+with per-pod persistent volumes if cross-pod failover time matters at your corpus size. Prefer the
+TEI embedding sidecar, which warms during the standby wait.
+
+This works because PostgreSQL is the single source of truth and everything in the process — the HNSW
+graph, trust scores, agent positions, in-flight gossip — is reconstructable from it. Failover is a
+*rebuild*, not a live-state *handoff*.
+
+## The lease
+
+Leader election rides on PostgreSQL, with no new etcd or ZooKeeper dependency. The lease is a
+PostgreSQL **advisory lock** (`pg_try_advisory_lock`), backed by an `ha_lease` heartbeat row:
+
+- The primary holds the advisory lock and updates `renewed_at` every `lease_renew_interval = 2s`.
+- The advisory lock is session-scoped: if the primary's connection dies, PostgreSQL releases the lock
+  automatically — no stale lock survives a dead holder.
+- A holder is live only while `now() - renewed_at < lease_ttl = 6s`. Past that, the lease is expired
+  and eligible for takeover.
+
+Because the lock lives in the same PostgreSQL that holds the data, the lease can never disagree with
+the data it guards.
+
+## Fence before promote
+
+Split-brain prevention is structural, not heuristic. A single advisory lock is mutually exclusive by
+construction — at most one session holds it. The standby cannot promote until it acquires the lock,
+and it can only acquire the lock once the old holder's session has ended.
+
+The timing ordering closes the time-based race:
+
+```text
+self_fence_deadline (4s)  <  lease_ttl (6s)  <  standby_promote_delay (8s)
+```
+
+A primary that cannot renew **must** have self-fenced — stopped all writes, closed all client streams,
+halted its workers — by the self-fence deadline (4s), which is strictly before the standby is even
+allowed to begin promotion (8s). So in the window where the standby takes over, the old primary is
+guaranteed to already be writing nothing.
+
+## Failover sequence
+
+<Steps>
+  <Step title="Detect">
+    The standby polls `ha_lease.renewed_at`. Failover becomes a candidate when the lease has been
+    expired (`now() - renewed_at ≥ lease_ttl`).
+  </Step>
+  <Step title="Wait the promote delay">
+    The standby waits until the lease has been expired for `standby_promote_delay = 8s`, guaranteeing
+    the old primary's self-fence deadline has elapsed.
+  </Step>
+  <Step title="Acquire the lock (fence)">
+    `pg_try_advisory_lock` succeeds only if the old holder's session is gone. Failure means another
+    standby won or the old primary recovered — abort and resume polling.
+  </Step>
+  <Step title="Restore the mesh">
+    Load the latest snapshot and replay only the rows newer than its watermark — a bounded delta, not
+    a full table scan. See [/operations/durability-and-dr](/operations/durability-and-dr).
+  </Step>
+  <Step title="Rebuild trust and start workers">
+    Re-hydrate agent trust scores from storage — trust is written through to PostgreSQL on every
+    update, so the new primary reads the exact accrued scores, not a cold reset. Then start the
+    gossip, promotion, and sweep workers and begin renewing the lease.
+  </Step>
+  <Step title="Flip readiness">
+    Once the `"graph"` probe reports `Up`, flip `/readyz` to ready and accept RPCs as the new primary.
+  </Step>
+</Steps>
+
+## Client reconnection
+
+Failover is indistinguishable from a single-server restart, so the SDKs need no HA-specific code. The
+client sees its stream error, backs off, reconnects to whichever process is primary (the load balancer
+routes only to a ready one), re-subscribes, and calls `get_inbox(since = last_seen)` to backfill. This
+works because delivery watermarks are PostgreSQL-sourced and therefore valid across instances.
+
+## RPO and RTO
+
+| Target | Value |
+|--------|-------|
+| RPO | ≤ 5s with asynchronous replication; **0** with synchronous commit (`remote_apply`), trading ~1–3 ms of write latency. |
+| RTO | ≤ 60s with a warm standby. |
+
+<Note>
+`/readyz` gates load-balancer membership, so traffic routes only to a ready primary. A standby holds
+no live mesh and issues zero writes until it is promoted.
+</Note>
+
+## What is lost, and why it is safe
+
+Acknowledged writes are durable in PostgreSQL and survive failover. In-flight gossip walks and open
+streams are lost — but bounded by design: delivered records are already durable, the sweep re-forwards
+anything that did not reach steady state, and idempotent delivery recording prevents duplicates on
+re-drive.
+
+## Source
+
+This page is a teaching restatement of the
+[high-availability spec](https://github.com/hyphae-db/hyphae-core/blob/main/specs/03-high-availability.md);
+that spec is authoritative for any detail here.

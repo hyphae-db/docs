@@ -1,0 +1,99 @@
+---
+title: Data lifecycle
+description: How HyphaeDB bounds unbounded growth and makes deletion complete — retention GC, in-memory eviction, propagating tombstones, compliant erasure, and re-embed migration.
+---
+
+HyphaeDB accumulates state on every tier with no built-in way to bound it or fully remove it. The
+data lifecycle adds the two missing halves of a complete story: **bound unbounded growth** (retention
+GC and in-memory eviction) so RAM and storage stay finite, and **make deletion complete and
+compliant** (a tombstone that propagates through the mesh, plus bulk erasure across every tier).
+
+The principle: **GC removes only provably-dead data — never mutating a live append-only row — and
+deletion is a positive act that propagates.** A tombstone travels the same energy-bounded mesh the
+original knowledge did, so "delete" reaches everyone "store" did.
+
+## Retention GC
+
+A background worker runs every hour, each pass bounded by a batch cap so it never stalls the gossip
+hot path:
+
+- **Expired diffs** are deleted once they are past `diff_retention` (the propagation TTL plus a 24-hour
+  grace). Note that a diff's TTL is a **propagation** TTL only — it halts the gossip walk, not storage
+  retention.
+- **Dead deliveries** are compacted: rows past `delivery_retention` (30 days) whose diff is itself dead
+  and already promoted or consolidated are dropped. The worker only **drops** provably-dead rows; it
+  never updates a live one, so append-only semantics hold.
+- **A2A task rows** ride the same pass: terminal task rows past `a2a.task_retention_days` (default
+  30 days) are cut, and an Agent-scoped erasure removes the agent's task rows too — see
+  [A2A tasks & streaming](/a2a/tasks-and-streaming).
+
+## In-memory eviction and cold tiering
+
+The in-memory graph is bounded independent of corpus size. When the node count exceeds the ceiling
+(1,000,000 by default) or a node has been idle past `cell_idle_eviction` (7 days), the eviction worker
+removes it from the HNSW graph and re-links its neighbors — but **keeps the PostgreSQL row**. An
+evicted node is a cache miss that re-loads on next access.
+
+At the ceiling, eviction drops the **coldest** nodes first and keeps the hottest resident. Beacon, L2,
+and Agent nodes are eviction-exempt — they are few and load-bearing for routing and positions.
+
+<Note>
+This is why the deployment memory budget is sized against the node ceiling, not the corpus. PostgreSQL
+may hold many more nodes than RAM. See [/operations/deployment-operations](/operations/deployment-operations).
+</Note>
+
+## Tombstones and delete propagation
+
+`delete_node` is no longer a local operation. It:
+
+<Steps>
+  <Step title="Persists a tombstone first">
+    So a crash mid-delete re-drives the delete on restart rather than leaving it half-done.
+  </Step>
+  <Step title="Removes the node locally">
+    Deletes the PostgreSQL row (cascading edges) and evicts the node from the in-memory graph.
+  </Step>
+  <Step title="Propagates a tombstone diff">
+    Seeds a `Tombstone`-type diff at the deleted node's embedding, so it traverses the same semantic
+    neighborhood the original reached — energy-bounded, no flood.
+  </Step>
+</Steps>
+
+An SDK that receives a tombstone delivery removes the referenced diff or node from its local caches.
+That is how a delete reaches **other agents' caches** — the gap a local delete left open. `delete_node`
+is idempotent: if a tombstone already exists for the target, it is a no-op.
+
+## Compliant erasure
+
+`erase(Agent)` or `erase(Project)` is the compliant, GDPR-style delete. It enumerates and removes
+everything for a scope across **all tiers** — PostgreSQL rows, the in-memory graph, and promoted
+L1/L2 aggregates (whose centroids are recomputed without the erased cells, or superseded) — propagates
+a tombstone per node so other agents' caches drop the content, and returns an **auditable erasure
+certificate** with per-tier counts and a digest. Erasure is bounded and idempotent: re-running it
+yields the same certificate with zero additional removals.
+
+## Re-embed migration
+
+Changing the embedding model puts the stored vectors in the wrong space, and the server fail-safes by
+refusing to load. The re-embed migration is the path forward: it streams every node, re-embeds it with
+the new model, re-links it in the graph, rewrites the stored model metadata, and rebuilds the snapshot.
+The resulting graph's recall matches a fresh build. V1 runs this offline (stop writes, re-embed, swap);
+an online dual-read cutover is a future enhancement.
+
+## Defaults
+
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `delivery_retention` | 30d | Delivery rows older than this are compaction candidates (dropped only if their diff is also dead). |
+| `diff_retention` | TTL + 24h grace | Diffs past this are deleted — propagation is long over. |
+| `cell_idle_eviction` | 7d | A node idle longer than this is evicted from RAM (kept in PostgreSQL). |
+| `node_ceiling` | 1,000,000 | Max in-memory L0 node count; over it, evict the coldest first. |
+| `gc_interval` | 1h | Cadence of the GC and eviction worker. |
+
+The retention TTLs are reloadable with `SIGHUP`. See [/operations/configuration](/operations/configuration).
+
+## Source
+
+This page is a teaching restatement of the
+[data-lifecycle spec](https://github.com/hyphae-db/hyphae-core/blob/main/specs/data-lifecycle.md);
+that spec is authoritative for any detail here.

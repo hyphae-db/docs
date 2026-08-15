@@ -1,0 +1,64 @@
+---
+title: "list_beacons"
+description: "List the beacon node ids the calling agent owns, over MCP."
+---
+
+List the beacon node ids this caller owns. Use it to inspect the standing interests you have placed with [place_beacon](/mcp/tools/place-beacon).
+
+Dispatches to the `list_beacons` internal service method.
+
+## Parameters
+
+This tool takes no arguments. Send an empty `arguments` object, or omit it.
+
+## Returns
+
+```json
+{ "node_ids": ["<uuid>", "..."] }
+```
+
+Returned as the `structuredContent` payload. The list is scoped to the authenticated principal — you see only your own beacons.
+
+## Example
+
+Request:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": { "name": "list_beacons", "arguments": {} }
+}
+```
+
+Response:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": [
+      { "type": "text", "text": "{\"node_ids\":[\"016c25fd-70e0-56fe-95d4-7dc06d72e8d9\"]}" }
+    ],
+    "structuredContent": { "node_ids": ["016c25fd-70e0-56fe-95d4-7dc06d72e8d9"] },
+    "isError": false
+  }
+}
+```
+
+## Annotations
+
+The tool's MCP behaviour hints, as emitted in `tools/list` (advisory display metadata — see [the annotations contract](/mcp/overview#tool-annotations)):
+
+| `readOnlyHint` | `destructiveHint` | `idempotentHint` | `openWorldHint` |
+|---|---|---|---|
+| `true` | `false` | `true` | `false` |
+
+A pure read of the caller's beacons — writes nothing.
+
+## Related
+
+- [place_beacon](/mcp/tools/place-beacon) to add a beacon.
+- [Positioning and beacons](/concepts/positioning-and-beacons).

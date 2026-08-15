@@ -1,0 +1,1441 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "HyphaeDB REST API",
+    "version": "1.0.0",
+    "description": "The unary REST surface over the HyphaeDB internal service facade. JSON over HTTP/1.1; every endpoint is a thin translator onto the same facade that gRPC and MCP speak. `recall` and `query` return fully hydrated nodes in rank order (nearest-first); no similarity score rides the wire — the array order conveys the rank.\n\nAll endpoints except `GET /healthz` require an API key supplied in the `x-hyphae-key` header. Errors use a uniform envelope: `{ \"error\": { \"code\": string, \"message\": string } }`.\n\nThis document covers the unary REST endpoints only. The WebSocket gossip stream (`GET /v1/inbox`) and the MCP-over-HTTP endpoint (`POST /mcp`) are separate surfaces not described here, and `GET /openapi.json` serves this document itself."
+  },
+  "servers": [
+    {
+      "url": "http://localhost:8080",
+      "description": "Local HyphaeDB server"
+    }
+  ],
+  "security": [
+    {
+      "ApiKeyAuth": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "Memory",
+      "description": "Store and retrieve knowledge cells."
+    },
+    {
+      "name": "Sessions",
+      "description": "Open and close working sessions."
+    },
+    {
+      "name": "Beacons",
+      "description": "Standing interest beacons for gossip routing."
+    },
+    {
+      "name": "Inbox",
+      "description": "The gossip inbox: the unary work-cycle drain for non-resident agents."
+    },
+    {
+      "name": "Scenes",
+      "description": "Scene listing, lookup, and consolidation."
+    },
+    {
+      "name": "Health",
+      "description": "Liveness probe."
+    }
+  ],
+  "paths": {
+    "/v1/store": {
+      "post": {
+        "tags": [
+          "Memory"
+        ],
+        "operationId": "store",
+        "summary": "Store a knowledge cell",
+        "description": "Store a single cell of knowledge and return its node id. Validation, quota, and authorization run inside the facade. `source_agent` and `tenant_id` are stamped from the authenticated principal and cannot be set by the client.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StoreBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The stored cell's node id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StoreResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableContent"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/v1/recall": {
+      "post": {
+        "tags": [
+          "Memory"
+        ],
+        "operationId": "recall",
+        "summary": "Recall similar cells (layer L0)",
+        "description": "Layer-L0 similarity recall. Returns a JSON array of fully hydrated knowledge nodes in rank order (nearest-first). No score is on the wire — the array order conveys the rank.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecallBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Hydrated nodes in rank order (nearest-first).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/KnowledgeNode"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableContent"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          },
+          "504": {
+            "$ref": "#/components/responses/Timeout"
+          }
+        }
+      }
+    },
+    "/v1/query": {
+      "post": {
+        "tags": [
+          "Memory"
+        ],
+        "operationId": "query",
+        "summary": "Query cells against an explicit layer",
+        "description": "Like recall, but against an explicit semantic layer (L0/L1/L2). Returns a JSON array of fully hydrated knowledge nodes in rank order.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Hydrated nodes in rank order (nearest-first).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/KnowledgeNode"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableContent"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          },
+          "504": {
+            "$ref": "#/components/responses/Timeout"
+          }
+        }
+      }
+    },
+    "/v1/inbox:pull": {
+      "post": {
+        "tags": [
+          "Inbox"
+        ],
+        "operationId": "pullInbox",
+        "summary": "Drain the caller's inbox (unary work-cycle pull)",
+        "description": "Drain the calling agent's own inbox without holding a stream open — the work-cycle pull for a non-resident agent (serverless, cron, orchestrated node).\n\nItems are paged by the monotonic `delivery_seq` (the delivery sequence), returning only commit-stable rows, and are acknowledged through a server-persisted cursor: pass the response's `window_high` back as `ack` on the next call once you have handled the page. Pull and ack ride ONE round trip — the `ack` is applied before this call's page is read, so it advances the floor for the very page it is sent with. An un-acked item is redelivered on the next pull (at-least-once), and a stale or lower `ack` is a no-op — the cursor never rewinds.\n\nThe response is a page envelope. Set `limit` to what your harness can inject in one turn, handle the whole page, and `ack` its `window_high`; if you can only handle part of it, `ack` the largest sequence all of whose items you handled. `has_more` says whether another page is already waiting.\n\nThe body carries NO agent id: the inbox drained is always the authenticated caller's. Within a page, items are presented highest-`score` first (a display ordering only — it never affects which items are in the page, nor the cursor). Because the page unit is the DELIVERY, a diff that was delivered to this agent twice (e.g. via an agent node and a beacon it owns) appears twice; de-duplicate on `diff.id` if you need observable exactly-once.\n\nCharged against the `Inbox` rate-limit bucket.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PullInboxBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The page of deliveries plus the acknowledged cursor after this call.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PullInboxResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableContent"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/v1/sessions": {
+      "post": {
+        "tags": [
+          "Sessions"
+        ],
+        "operationId": "startSession",
+        "summary": "Open a session",
+        "description": "Open a working session in the given project and return its session id.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartSessionBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The opened session's id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableContent"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/v1/sessions/{id}": {
+      "delete": {
+        "tags": [
+          "Sessions"
+        ],
+        "operationId": "endSession",
+        "summary": "Close a session",
+        "description": "Close the session identified by the path id.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The session id (UUID).",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The session was closed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/v1/beacons": {
+      "post": {
+        "tags": [
+          "Beacons"
+        ],
+        "operationId": "placeBeacon",
+        "summary": "Place an interest beacon",
+        "description": "Place a standing interest beacon, returning the node id of the beacon node.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlaceBeaconBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The placed beacon's node id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlaceBeaconResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableContent"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Beacons"
+        ],
+        "operationId": "listBeacons",
+        "summary": "List this caller's beacons",
+        "description": "List the node ids of the beacons placed by the authenticated caller.",
+        "responses": {
+          "200": {
+            "description": "The caller's beacon node ids.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListBeaconsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/v1/scenes": {
+      "get": {
+        "tags": [
+          "Scenes"
+        ],
+        "operationId": "listScenes",
+        "summary": "List scenes in scope",
+        "description": "List the scenes in the caller's read scope with opaque cursor pagination (FR-13). Returns a `SceneList` envelope: omit `cursor` for the first page, then pass the prior page's `next_cursor` back as `cursor` to fetch the next page. A `null` `next_cursor` marks the last page.",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "Opaque cursor from a prior page's next_cursor",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size; clamped to the server max; omitted = default",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of scenes in scope, with a cursor to the next page (FR-13).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SceneList"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/v1/scenes/{id}": {
+      "get": {
+        "tags": [
+          "Scenes"
+        ],
+        "operationId": "getScene",
+        "summary": "Fetch one scene",
+        "description": "Fetch a single scene by id. An absent or out-of-scope scene returns 404 (out-of-scope is indistinguishable from absent, by design).",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The scene id (UUID).",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The requested scene.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Scene"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/v1/scenes/{id}/consolidate": {
+      "post": {
+        "tags": [
+          "Scenes"
+        ],
+        "operationId": "consolidateScene",
+        "summary": "Consolidate a scene",
+        "description": "Trigger consolidation of a scene (a gRPC/REST-only operation, not an MCP tool). Returns a report of how many cells were superseded and promoted.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The scene id (UUID).",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The consolidation report.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsolidationReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "operationId": "healthz",
+        "summary": "Liveness probe",
+        "description": "Unauthenticated liveness probe (a load-balancer health check). Returns the plain-text body `ok`.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The server is alive.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string",
+                  "example": "ok"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "operationId": "readyz",
+        "summary": "Readiness probe",
+        "description": "Unauthenticated readiness probe. Returns `200 ready` while serving; `503 draining` once a graceful shutdown has begun, so a load balancer removes the pod from rotation before the drain (deployment-operations.md §7.4). Liveness (`/healthz`) stays 200 throughout.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The server is ready for traffic.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string",
+                  "example": "ready"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is draining (graceful shutdown in progress) and not ready for new traffic.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string",
+                  "example": "draining"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ApiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-hyphae-key",
+        "description": "The API key issued for the calling agent. Required on every endpoint except `GET /healthz`."
+      }
+    },
+    "schemas": {
+      "CellType": {
+        "type": "string",
+        "description": "The nine cell types the energy and promotion models are calibrated against.",
+        "enum": [
+          "Decision",
+          "Constraint",
+          "Risk",
+          "Pattern",
+          "Lesson",
+          "Fact",
+          "Preference",
+          "Context",
+          "Task"
+        ]
+      },
+      "Layer": {
+        "type": "string",
+        "description": "Semantic hierarchy. L0 = raw cells, L1 = scene centroids/patterns, L2 = architectural decisions/constraints.",
+        "enum": [
+          "L0",
+          "L1",
+          "L2"
+        ]
+      },
+      "NodeType": {
+        "description": "What a graph node represents. Serialized as an externally-tagged enum: the unit variant `Scene` is the bare string `\"Scene\"`; the data-carrying variants are single-key objects (`Cell`, `Agent`, `Beacon`).",
+        "oneOf": [
+          {
+            "type": "string",
+            "enum": [
+              "Scene"
+            ],
+            "description": "A scene node."
+          },
+          {
+            "type": "object",
+            "description": "A cell node carrying its cell type.",
+            "additionalProperties": false,
+            "required": [
+              "Cell"
+            ],
+            "properties": {
+              "Cell": {
+                "$ref": "#/components/schemas/CellType"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "An agent node carrying the agent id.",
+            "additionalProperties": false,
+            "required": [
+              "Agent"
+            ],
+            "properties": {
+              "Agent": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A beacon node carrying its owner agent id.",
+            "additionalProperties": false,
+            "required": [
+              "Beacon"
+            ],
+            "properties": {
+              "Beacon": {
+                "type": "object",
+                "required": [
+                  "owner"
+                ],
+                "properties": {
+                  "owner": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "SourceRef": {
+        "type": "object",
+        "description": "A reference back to the source of a cell's content (e.g. `file:line`, `url`).",
+        "required": [
+          "kind",
+          "locator"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "The reference kind, e.g. `file` or `url`."
+          },
+          "locator": {
+            "type": "string",
+            "description": "The locator within that kind, e.g. a path or URL."
+          }
+        }
+      },
+      "KnowledgeNode": {
+        "type": "object",
+        "description": "A unit of knowledge as persisted and hydrated by recall/query.",
+        "required": [
+          "id",
+          "tenant_id",
+          "embedding",
+          "node_type",
+          "cell_type",
+          "content",
+          "salience",
+          "source_agent",
+          "created_at",
+          "last_accessed",
+          "layer"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "tenant_id": {
+            "type": "string",
+            "description": "Always set; `default` in V1."
+          },
+          "embedding": {
+            "type": "array",
+            "description": "The cell's embedding vector.",
+            "items": {
+              "type": "number",
+              "format": "float"
+            }
+          },
+          "node_type": {
+            "$ref": "#/components/schemas/NodeType"
+          },
+          "cell_type": {
+            "$ref": "#/components/schemas/CellType"
+          },
+          "content": {
+            "type": "string"
+          },
+          "scene_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "description": "The owning scene, if any."
+          },
+          "salience": {
+            "type": "number",
+            "format": "float",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Constrained to [0.0, 1.0]."
+          },
+          "source_agent": {
+            "type": "string",
+            "description": "The agent that produced this cell."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "last_accessed": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "layer": {
+            "$ref": "#/components/schemas/Layer"
+          },
+          "superseded_by": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "description": "Supersession pointer; set once this cell has been abstracted into a higher-layer Pattern. `null` = live."
+          }
+        }
+      },
+      "Scene": {
+        "type": "object",
+        "description": "A clustering of related cells around a centroid. `summary` is an LLM synthesis of the scene's member cells, so a scene is content: every read of it is tenant-scoped.",
+        "required": [
+          "id",
+          "tenant_id",
+          "project_id",
+          "centroid",
+          "summary",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "tenant_id": {
+            "type": "string",
+            "description": "Always set; server-derived and always the caller's own tenant (a scoped read cannot return another's). `default` in V1."
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "centroid": {
+            "type": "array",
+            "description": "The scene centroid vector.",
+            "items": {
+              "type": "number",
+              "format": "float"
+            }
+          },
+          "summary": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SceneList": {
+        "type": "object",
+        "required": [
+          "scenes"
+        ],
+        "properties": {
+          "scenes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Scene"
+            }
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true,
+            "description": "Cursor for the next page; null when this is the last page (FR-13)."
+          }
+        }
+      },
+      "NodeFilter": {
+        "type": "object",
+        "description": "Structural filter for recall/query. `source_agent` and `tenant_id` here are client-convenience filters; the enforced read boundary is applied separately by the server.",
+        "properties": {
+          "cell_types": {
+            "type": "array",
+            "nullable": true,
+            "description": "Restrict to these cell types.",
+            "items": {
+              "$ref": "#/components/schemas/CellType"
+            }
+          },
+          "scene_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "description": "Restrict to a single scene."
+          },
+          "source_agent": {
+            "type": "string",
+            "nullable": true,
+            "description": "Restrict to a single source agent."
+          },
+          "tenant_id": {
+            "type": "string",
+            "nullable": true,
+            "description": "Convenience tenant filter (not the enforced boundary)."
+          }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "description": "The uniform error envelope returned for every non-2xx response.",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "type": "string",
+                "description": "A stable, machine-readable error code.",
+                "enum": [
+                  "not_found",
+                  "validation",
+                  "dimension_mismatch",
+                  "unauthorized",
+                  "forbidden",
+                  "conflict",
+                  "transaction",
+                  "quota_exceeded",
+                  "rate_limited",
+                  "timeout",
+                  "unavailable",
+                  "storage",
+                  "embedding",
+                  "config",
+                  "internal"
+                ]
+              },
+              "message": {
+                "type": "string",
+                "description": "A redaction-safe, human-readable description (never embeds secrets)."
+              }
+            }
+          }
+        }
+      },
+      "StoreBody": {
+        "type": "object",
+        "description": "The body for `POST /v1/store`.",
+        "required": [
+          "content",
+          "cell_type"
+        ],
+        "properties": {
+          "content": {
+            "type": "string",
+            "description": "The cell's text content."
+          },
+          "cell_type": {
+            "$ref": "#/components/schemas/CellType"
+          },
+          "salience": {
+            "type": "number",
+            "format": "float",
+            "default": 0.5,
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Importance hint in [0.0, 1.0]; the server clamps out-of-range values."
+          },
+          "scene_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "An optional owning scene id."
+          },
+          "source_ref": {
+            "$ref": "#/components/schemas/SourceRef"
+          },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": true,
+            "default": {},
+            "description": "Arbitrary JSON metadata; defaults to an empty object."
+          },
+          "idempotency_key": {
+            "type": "string",
+            "description": "An optional key to deduplicate retried stores."
+          }
+        }
+      },
+      "RecallBody": {
+        "type": "object",
+        "description": "The body for `POST /v1/recall`.",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "The query text to embed and recall against."
+          },
+          "k": {
+            "type": "integer",
+            "default": 10,
+            "minimum": 1,
+            "description": "The maximum number of nodes to return."
+          },
+          "filter": {
+            "$ref": "#/components/schemas/NodeFilter"
+          }
+        }
+      },
+      "QueryBody": {
+        "type": "object",
+        "description": "The body for `POST /v1/query`.",
+        "required": [
+          "text",
+          "layer"
+        ],
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "The query text to embed and query against."
+          },
+          "layer": {
+            "$ref": "#/components/schemas/Layer"
+          },
+          "k": {
+            "type": "integer",
+            "default": 10,
+            "minimum": 1,
+            "description": "The maximum number of nodes to return."
+          },
+          "filter": {
+            "$ref": "#/components/schemas/NodeFilter"
+          }
+        }
+      },
+      "StartSessionBody": {
+        "type": "object",
+        "description": "The body for `POST /v1/sessions`.",
+        "required": [
+          "project_id"
+        ],
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "description": "The project to open the session in."
+          }
+        }
+      },
+      "PullInboxBody": {
+        "type": "object",
+        "description": "The body for `POST /v1/inbox:pull`. Every field is optional — `{}` means \"drain from my stored cursor, at the server's page cap, acknowledging nothing\". There is deliberately NO agent id field: the caller is the authenticated principal.",
+        "properties": {
+          "since": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Explicit page floor: return deliveries whose `delivery_seq` is strictly greater than this, OVERRIDING the stored ack cursor. Omit for the normal case (resume from the cursor; from the beginning if the agent has never acked)."
+          },
+          "ack": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Acknowledge every delivery up to this `delivery_seq` — normally the `window_high` of the previous response. Monotonic: a value at or below the stored watermark is a no-op, never a rewind, and the server clamps it to the newest sequence the same call examined, so it can never skip past deliveries the server did not look at. The acknowledgement is applied BEFORE this call's page is read, so it also advances this call's page floor — that is what makes pull-and-ack one round trip."
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0,
+            "description": "Requested page size. Omitted or `0` means the server's `pull.max_batch`; a larger value is clamped down to it. Size this to whatever your harness can actually inject in one turn (Claude Code caps hook output at 10 000 characters, Codex at roughly 2 500 tokens) so you can handle a whole page and acknowledge `window_high` cleanly."
+          }
+        }
+      },
+      "SeqInboxItem": {
+        "type": "object",
+        "description": "One delivered diff plus the sequence the cursor tracks.",
+        "required": [
+          "delivery_seq",
+          "diff",
+          "delivery"
+        ],
+        "properties": {
+          "delivery_seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The delivery sequence — the page order key and the unit of `ack`."
+          },
+          "diff": {
+            "type": "object",
+            "description": "The delivered `MemoryDiff` (the gossip payload: content, embedding, energy, provenance)."
+          },
+          "delivery": {
+            "type": "object",
+            "description": "The `DeliveryRecord` for this delivery (score, hop count, remaining energy, delivered-at)."
+          }
+        }
+      },
+      "PullInboxResponse": {
+        "type": "object",
+        "description": "A page ENVELOPE, not a bare list: `items` is what you may see, `window_high` is how far you may acknowledge, and `has_more` is whether another page is waiting. The three answer different questions and none is derivable from the others.",
+        "required": [
+          "items",
+          "cursor",
+          "window_high",
+          "has_more"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "description": "The page, highest-`delivery.score` first (an intra-page display ordering).",
+            "items": {
+              "$ref": "#/components/schemas/SeqInboxItem"
+            }
+          },
+          "cursor": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The acknowledged watermark AFTER this call (`0` = nothing acknowledged yet). Unchanged when the request carried no `ack`; compare it with the `ack` you sent to detect one that was clamped or ignored."
+          },
+          "window_high": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The top of the delivery window this call examined — the highest `delivery_seq` your next call may `ack`. Handled every item? Send this back as `ack`. Handled only some (the normal case under a hook injection cap)? Send back the largest sequence all of whose items you handled — because the page is presented score-first, that is generally NOT the newest item you received. This is deliberately NOT the maximum `delivery_seq` in `items`: it is greater whenever your read scope filtered a delivery out of the window, and acknowledging your newest ITEM instead would make the cursor re-scan those rows on every pull."
+          },
+          "has_more": {
+            "type": "boolean",
+            "description": "Whether a further commit-stable delivery exists above `window_high` right now — i.e. whether pulling again immediately would examine more. It describes the delivery window, not `items`: under a narrow read scope a `true` can be followed by a page with no items."
+          }
+        }
+      },
+      "PlaceBeaconBody": {
+        "type": "object",
+        "description": "The body for `POST /v1/beacons`.",
+        "required": [
+          "interest"
+        ],
+        "properties": {
+          "interest": {
+            "type": "string",
+            "description": "The interest text the beacon stands for."
+          }
+        }
+      },
+      "StoreResponse": {
+        "type": "object",
+        "required": [
+          "node_id"
+        ],
+        "properties": {
+          "node_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The stored cell's node id."
+          }
+        }
+      },
+      "SessionResponse": {
+        "type": "object",
+        "required": [
+          "session_id"
+        ],
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The opened session's id."
+          }
+        }
+      },
+      "OkResponse": {
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              true
+            ],
+            "description": "Always `true` on success."
+          }
+        }
+      },
+      "PlaceBeaconResponse": {
+        "type": "object",
+        "required": [
+          "node_id"
+        ],
+        "properties": {
+          "node_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The placed beacon's node id."
+          }
+        }
+      },
+      "ListBeaconsResponse": {
+        "type": "object",
+        "required": [
+          "node_ids"
+        ],
+        "properties": {
+          "node_ids": {
+            "type": "array",
+            "description": "The caller's beacon node ids.",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        }
+      },
+      "ConsolidationReport": {
+        "type": "object",
+        "required": [
+          "scene_id",
+          "superseded",
+          "promoted"
+        ],
+        "properties": {
+          "scene_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The consolidated scene id."
+          },
+          "superseded": {
+            "type": "integer",
+            "description": "How many cells were superseded."
+          },
+          "promoted": {
+            "type": "integer",
+            "description": "How many cells were promoted to a higher layer."
+          }
+        }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "The request was malformed or failed validation (codes: `validation`, `dimension_mismatch`).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "UnsupportedMediaType": {
+        "description": "The request body was sent with a non-JSON `Content-Type` (code: `validation`). Send `Content-Type: application/json`.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "UnprocessableContent": {
+        "description": "The JSON body parsed but did not match the expected shape — a missing required field or a wrong field type (code: `validation`).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "Missing or invalid `x-hyphae-key` (code: `unauthorized`).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "Authenticated but not permitted (code: `forbidden`).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "The resource was absent or out of scope (code: `not_found`).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Conflict": {
+        "description": "A conflicting or aborted operation (codes: `conflict`, `transaction`).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "RateLimited": {
+        "description": "Quota exhausted or rate limited (codes: `quota_exceeded`, `rate_limited`). A `rate_limited` response sets the `Retry-After` header (in seconds).",
+        "headers": {
+          "Retry-After": {
+            "description": "Seconds to wait before retrying (only on `rate_limited`).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Timeout": {
+        "description": "The operation timed out (code: `timeout`).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Unavailable": {
+        "description": "A dependency was unavailable (codes: `unavailable`, `storage`).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "ServerError": {
+        "description": "An internal error (codes: `embedding`, `config`, `internal`).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    }
+  }
+}

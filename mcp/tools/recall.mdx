@@ -1,0 +1,83 @@
+---
+title: "recall"
+description: "Recall the k nearest memory cells to a query at layer L0 over MCP; returns distance-ranked node ids."
+---
+
+Recall the `k` most-similar memory cells to a query at layer L0, scoped to the caller. The server embeds the query text and returns distance-ranked node ids, nearest first.
+
+Dispatches to the `recall` internal service method. For an explicit semantic layer, use [query](/mcp/tools/query) instead.
+
+## Parameters
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `text` | string | Yes | — | The query text, embedded server-side. |
+| `k` | integer | No | `10` | Number of neighbours to return (minimum `1`). |
+| `filter` | object | No | — | A convenience `NodeFilter`, AND-ed after the caller's access scope. |
+
+## Returns
+
+```json
+{
+  "nodes": [
+    { "node_id": "<uuid>", "distance": <number> }
+  ]
+}
+```
+
+Returned as the `structuredContent` payload. Results are ordered nearest first (smallest `distance`).
+
+<Note>
+Over MCP, `recall` returns only `{node_id, distance}` pairs — not hydrated cell content. To read a cell's content, use a hydrating surface such as the [REST API](/api-reference/overview), which returns full nodes.
+</Note>
+
+## Example
+
+Request:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "recall",
+    "arguments": { "text": "which vector store did we pick?", "k": 3 }
+  }
+}
+```
+
+Response:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": [
+      { "type": "text", "text": "{\"nodes\":[{\"node_id\":\"6f9619ff-8b86-d011-b42d-00cf4fc964ff\",\"distance\":0.12}]}" }
+    ],
+    "structuredContent": {
+      "nodes": [
+        { "node_id": "6f9619ff-8b86-d011-b42d-00cf4fc964ff", "distance": 0.12 }
+      ]
+    },
+    "isError": false
+  }
+}
+```
+
+## Annotations
+
+The tool's MCP behaviour hints, as emitted in `tools/list` (advisory display metadata — see [the annotations contract](/mcp/overview#tool-annotations)):
+
+| `readOnlyHint` | `destructiveHint` | `idempotentHint` | `openWorldHint` |
+|---|---|---|---|
+| `true` | `false` | `true` | `false` |
+
+A pure vector read — writes nothing.
+
+## Related
+
+- [query](/mcp/tools/query) for layered search across L0/L1/L2.
+- [The HNSW mesh](/concepts/hnsw-mesh) for how nearest-neighbour search works.

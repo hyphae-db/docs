@@ -1,0 +1,67 @@
+---
+title: "list_scenes"
+description: "List the scenes visible within the calling agent's read scope, over MCP."
+---
+
+List the scenes visible within the caller's read scope.
+
+Dispatches to the `list_scenes` internal service method.
+
+## Parameters
+
+This tool takes no arguments. Send an empty `arguments` object, or omit it.
+
+## Returns
+
+```json
+{ "scenes": [ /* Scene */ ] }
+```
+
+Returned as the `structuredContent` payload. The list is scoped to the authenticated principal — you see only scenes within your read scope.
+
+## Example
+
+Request:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": { "name": "list_scenes", "arguments": {} }
+}
+```
+
+Response:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": [
+      { "type": "text", "text": "{\"scenes\":[]}" }
+    ],
+    "structuredContent": { "scenes": [] },
+    "isError": false
+  }
+}
+```
+
+## Annotations
+
+The tool's MCP behaviour hints, as emitted in `tools/list` (advisory display metadata — see [the annotations contract](/mcp/overview#tool-annotations)):
+
+| `readOnlyHint` | `destructiveHint` | `idempotentHint` | `openWorldHint` |
+|---|---|---|---|
+| `true` | `false` | `true` | `false` |
+
+A pure scoped read — writes nothing.
+
+## Related
+
+- [get_scene](/mcp/tools/get-scene) to fetch one scene by id.
+
+<Note>
+Building a consolidated scene (`consolidate_scene`) is a heavyweight maintenance operation that is not exposed over MCP. It is available over [gRPC](/grpc/overview) and the [REST API](/api-reference/overview) only.
+</Note>

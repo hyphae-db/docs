@@ -1,0 +1,128 @@
+---
+title: "Propagation in five minutes"
+description: "Watch a memory travel from one agent to another with no query in between — the store-don't-broadcast thesis, running end to end between two agents."
+---
+
+The [quickstart](/quickstart) showed one agent storing a memory and recalling it — a *pull*. This page
+shows the thing that makes HyphaeDB different: an agent receiving a memory it **never asked for**,
+because another agent stored something relevant to it. No query, no polling, no shared queue — the mesh
+routes the knowledge to the agent that needs it.
+
+<Note>
+**Prerequisites.** Finish the [quickstart](/quickstart) first: the server up on `localhost:50051`, and
+this time **two** agent API keys — one per agent. Issue a second `hyk_...` key so the two agents have
+distinct authenticated identities (identity is bound from the key, never self-asserted) —
+`POST /admin/api/agents` on the [admin control plane](/operations/admin-control-plane) issues one and
+returns its secret exactly once. Export them:
+
+```bash
+export PLANNER_KEY="hyk_..."   # the agent that learns something
+export WORKER_KEY="hyk_..."    # the agent that should hear about it
+```
+</Note>
+
+## The idea
+
+Two agents, no direct connection between them:
+
+- A **worker** declares a standing interest — "I care about database-storage decisions" — by placing a
+  [beacon](/concepts/positioning-and-beacons). The beacon fixes the worker's position in the mesh near
+  that topic.
+- A **planner** later stores a high-salience `DECISION` about exactly that topic. It tells no one to read
+  it.
+- The server turns that write into a [memory diff](/concepts/gossip-propagation) and lets it
+  [propagate](/concepts/energy-model). Because the worker's beacon sits near the decision in embedding
+  space, the diff is relevant there, so it gossips to the worker and lands on its **inbox** — live.
+
+## Run it
+
+Both agents in one script for a copy-paste demo (in a real system they are separate processes on
+separate machines — the flow is identical):
+
+```python
+import asyncio
+import os
+
+from hyphaedb import HyphaeClient, CellInput, CellType
+
+ENDPOINT = "localhost:50051"
+
+
+async def worker(beacon_ready: asyncio.Event) -> None:
+    # The worker never queries. It declares an interest and then just listens.
+    async with await HyphaeClient.connect(ENDPOINT, os.environ["WORKER_KEY"]) as w:
+        await w.start_session("worker")                      # opens the live inbox stream
+        await w.place_beacon("decisions about database storage")
+        beacon_ready.set()                                   # tell the planner the target exists
+
+        async for item in w.inbox():                         # deduped, live gossip deliveries
+            print("worker received a memory it never asked for:", item.delivery.diff_id)
+            break                                            # one delivery is enough for the demo
+
+
+async def planner(beacon_ready: asyncio.Event) -> None:
+    await beacon_ready.wait()                                # place the beacon before we store
+    async with await HyphaeClient.connect(ENDPOINT, os.environ["PLANNER_KEY"]) as p:
+        await p.start_session("planner")
+        node_id = await p.store(
+            CellInput(
+                cell_type=CellType.DECISION,                 # a decision carries more energy
+                content="We use PostgreSQL + pgvector for V1 storage.",
+                salience=0.9,                                # salient → travels farther
+            )
+        )
+        print("planner stored", node_id, "— and told no one to read it")
+
+
+async def main() -> None:
+    beacon_ready = asyncio.Event()
+    await asyncio.gather(worker(beacon_ready), planner(beacon_ready))
+
+
+asyncio.run(main())
+```
+
+Run it and you'll see the planner store a decision and, a moment later, the worker print that it received
+a memory — with no `recall`, no query, nothing connecting the two agents but the mesh.
+
+## What just happened
+
+The worker got knowledge pushed to it because three things lined up:
+
+1. **Relevance routing.** `store` embedded the decision and released its diff into the same
+   [HNSW graph](/concepts/hnsw-mesh) that carries gossip. The worker's beacon had placed its node near
+   that semantic region, so the decision's diff found a strong edge toward the worker.
+2. **An energy budget.** The diff didn't flood the whole mesh — it carried an
+   [energy budget](/concepts/energy-model) and spent it hop by hop. A `DECISION` at `salience = 0.9` is
+   seeded with more energy than a routine `TASK`, so it travels farther. When a diff can no longer afford
+   any remaining edge, it stops.
+3. **A live inbox.** Because the worker started a session, diffs that reach its node arrive on its inbox,
+   de-duplicated and replayable — so a reconnecting agent catches up on what it missed before going live.
+
+This is the *store-don't-broadcast* model: you write a memory once, and the mesh decides who should hear
+about it. The planner never had to know the worker existed.
+
+## Try changing it
+
+- **Lower the salience** to `0.1`, or use `cell_type=CellType.TASK`. The diff is seeded with less energy
+  and may no longer reach the worker — the whole point of the [energy model](/concepts/energy-model).
+- **Change the beacon interest** to something unrelated (`"frontend styling"`). The decision is no longer
+  relevant to the worker's position, so it does not propagate there.
+- **Add a second worker** with a different beacon and watch which one the decision reaches.
+
+## Next steps
+
+<Columns cols={2}>
+  <Card title="Gossip propagation" icon="diagram-project" href="/concepts/gossip-propagation">
+    How a diff walks the mesh, and why it stops.
+  </Card>
+  <Card title="The energy model" icon="bolt" href="/concepts/energy-model">
+    What decides how far a memory travels.
+  </Card>
+  <Card title="Positioning & beacons" icon="location-dot" href="/concepts/positioning-and-beacons">
+    How an agent shapes what the mesh routes to it.
+  </Card>
+  <Card title="Topology Observatory" icon="satellite-dish" href="/operations/topology-observatory">
+    Watch propagation happen live, hop by hop, as an operator.
+  </Card>
+</Columns>

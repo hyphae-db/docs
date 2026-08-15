@@ -1,0 +1,62 @@
+---
+title: "Layer promotion"
+description: "How knowledge earns its way up the mesh hierarchy as it proves useful — and how contradictions push it back down."
+---
+
+Not all knowledge deserves the same reach. A note that was delivered once and never confirmed should stay local; a decision that has been delivered widely and never contradicted should travel across the whole mesh. **Layer promotion** is the mechanism that lets knowledge earn its way up the three-layer hierarchy of [the HNSW mesh](/concepts/hnsw-mesh) based on how it has actually been used.
+
+## The promotion gates
+
+When the engine evaluates a diff with `check_promotion`, it applies layer-specific gates.
+
+### Layer 0 to Layer 1
+
+An L0 diff promotes to L1 only when all of these hold:
+
+- its cell type is one of **Decision**, **Pattern**, **Constraint**, or **Lesson** (the L0→L1 eligible types),
+- `delivery_count >= 5` within the same scene, and
+- `contradictions == 0`.
+
+In other words, only knowledge of an eligible type that has been delivered repeatedly in one context, with nothing disputing it, is promoted. A `Fact`, `Risk`, `Task`, `Preference`, or `Context` cell stays at Layer 0 no matter how often it is delivered.
+
+### Layer 1 to Layer 2
+
+An L1 diff promotes to L2 only if its cell type is **Decision** or **Constraint** — the `l1_to_l2_eligible_types`. Layer 2 is reserved for the kinds of knowledge that shape everyone's work.
+
+<Note>
+Promotion into Layer 2 is the strictest gate. Beyond requiring a Decision or Constraint cell type, the diff must also have proven cross-context reach — delivered across at least three distinct scenes, with high salience and still zero contradictions. The full conditions are in the mesh-layer spec.
+</Note>
+
+Layer 2 is the **ceiling**. There is no promotion above it.
+
+## Promotion is trust-gated
+
+Reach is a privilege, not a right. A diff whose source agent has trust **below** `min_trust_to_promote = 0.4` is never promoted, no matter how many times it has been delivered. This stops a low-trust or adversarial source from pushing knowledge up the hierarchy simply by generating volume.
+
+<Warning>
+The promotion gates assume the diff's `source_agent` is authentic. That assumption is upheld by authentication, not by the promotion logic itself — see [trust and provenance](/concepts/trust-and-provenance).
+</Warning>
+
+## What executing a promotion does
+
+When a diff is promoted, the engine re-inserts it at the higher layer and re-energises it so the more important version reaches farther:
+
+- adds `promotion_energy_bonus = 5.0` to its initial energy,
+- resets `hop_count = 0` and clears the visited `path`, and
+- re-propagates it through the mesh as a `Promoted` diff.
+
+Resetting the hop count and path matters: the promoted diff starts a fresh propagation from a higher, sparser layer with a topped-up budget, so it spreads across the mesh rather than continuing a walk that had already nearly run out of energy. See [the energy model](/concepts/energy-model) for how that budget is spent.
+
+## Contradictions push knowledge back down
+
+Promotion is not one-way. If a promoted diff is later contradicted, the engine can **demote** or supersede it: the contradiction takes priority on the next `check_promotion`, and the correction is itself re-propagated with the same energy bonus and a reset path, so the demotion reaches everywhere the original promotion did. The mesh self-corrects rather than entrenching a claim that turned out to be wrong.
+
+## How this connects to the rest of the system
+
+Promotion sits on top of [gossip propagation](/concepts/gossip-propagation) (it counts deliveries and re-propagates), [the HNSW mesh](/concepts/hnsw-mesh) (it moves nodes up the layer hierarchy), [the energy model](/concepts/energy-model) (it grants the energy bonus), and [trust and provenance](/concepts/trust-and-provenance) (it gates on the source's trust).
+
+## Source
+
+This page is a teaching restatement of the HyphaeDB specifications. It does not define new behaviour.
+
+- [mesh-layer spec §6.3 (FR-5 / FR-6)](https://github.com/hyphae-db/hyphae-core/blob/main/specs/mesh-layer.md) — promotion gates, trust gating, the promotion energy bonus and re-propagation, and demotion / supersession.

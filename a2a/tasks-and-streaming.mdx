@@ -1,0 +1,82 @@
+---
+title: "A2A tasks & streaming"
+description: "Reading and canceling A2A tasks, SSE streaming over message:stream and tasks/{id}:subscribe, and push-notification-config storage."
+---
+
+A [`share`](/a2a/memory-skills) hands back a Task. This page covers what you can do with it:
+read it, cancel it, stream its updates — and store push-notification configs against it.
+
+## Task reads and cancel
+
+| Method + path | What it does |
+|---|---|
+| `GET /a2a/v1/tasks` | List the caller's own tasks (keyset-paginated) |
+| `GET /a2a/v1/tasks/{id}` | Read one task |
+| `POST /a2a/v1/tasks/{id}:cancel` | Cancel a task that has not yet started working |
+
+Every task operation is **owner-confined**: you can only ever see or act on your own tasks. A
+foreign or absent task id answers with an indistinguishable masked `TaskNotFound` — the response
+for "not yours" and "does not exist" is identical, so a task id can never be used as an existence
+oracle across agents or tenants. Only a `TASK_STATE_SUBMITTED` task is cancelable: canceling a
+`TASK_STATE_WORKING` or already-terminal task answers with the canonical `TaskNotCancelable`
+(`400`), and the task row is unchanged.
+
+<Note>
+  Task states are sent as their **ProtoJSON enum names** — `TASK_STATE_COMPLETED`, not `completed`
+  — as A2A v1.0.1 §5.5 requires. The same goes for message roles: `ROLE_USER` inbound, `ROLE_AGENT`
+  on everything the server writes. For compatibility with clients written against earlier builds of
+  this surface, an inbound `"role": "user"` is still accepted; every other legacy spelling is not.
+</Note>
+
+## Streaming (SSE)
+
+Two routes stream over Server-Sent Events:
+
+- `POST /a2a/v1/message:stream` — the same deterministic dispatch as `message:send`, with the
+  response streamed: a synchronous skill emits one message event; a `share` emits the task's status
+  updates as they happen, ending with the terminal event.
+- `POST /a2a/v1/tasks/{id}:subscribe` — subscribe to an existing task's updates. The server polls
+  the task row on a bounded interval (`a2a.subscribe_poll_secs`, default `1`) and closes the stream
+  at a terminal state or disconnect. The same owner-confined `TaskNotFound` masking applies.
+  Subscribing to a task that is **already terminal** answers with `UnsupportedOperation` (`400`)
+  rather than opening a stream — per A2A v1.0.1, the operation is only for tasks that are not yet
+  terminal. Read a finished task with `GET /a2a/v1/tasks/{id}` instead.
+
+There is no `final` flag on a status-update event. A stream ends when the task reaches a terminal
+state: read terminality from `status.state` and treat the stream closing as the end of the
+sequence.
+
+Open streams are capped per principal: `a2a.max_streams_per_principal` (default `8`). A caller over
+the cap is rate-limited until one of its streams closes.
+
+## Push-notification configs: storage only
+
+A2A defines per-task push-notification configs, and HyphaeDB stores and manages them:
+
+| Method + path | What it does |
+|---|---|
+| `POST /a2a/v1/tasks/{id}/pushNotificationConfigs` | Create or replace a config |
+| `GET /a2a/v1/tasks/{id}/pushNotificationConfigs` | List the task's configs |
+| `GET /a2a/v1/tasks/{id}/pushNotificationConfigs/{configId}` | Read one config |
+| `DELETE /a2a/v1/tasks/{id}/pushNotificationConfigs/{configId}` | Delete a config |
+
+This is **storage and CRUD only — the server does not deliver push notifications today**. Outbound
+delivery is the job of agent activation, a proposed and unbuilt component; until it ships, a stored
+config is a durable record of where notifications should eventually go, nothing more.
+
+The stored rows are treated as future egress destinations, which is why the write path is strict:
+
+- Config `url`s must be `https` (`http` is permitted in Dev only).
+- At most `a2a.max_push_configs_per_task` (default `4`) configs per task.
+- A config carrying credentials in its `authentication` payload is rejected at decode — the server
+  never stores credentials for dialing the endpoint. The optional validation `token` is stored,
+  echoed only to its owner, and never logged or audited.
+- Every config mutation is owner-confined (the same masked `TaskNotFound`) and audited
+  synchronously, fail-closed — see [the audit log](/operations/audit-log).
+
+## Task lifecycle and retention
+
+Task rows are thin — status and references, never memory content. They ride the standard
+[data lifecycle](/operations/data-lifecycle): terminal rows are GC-cut after
+`a2a.task_retention_days` (default `30`), and an agent-scoped erasure removes the agent's task rows
+(and their push configs) along with everything else.

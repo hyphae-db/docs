@@ -1,0 +1,68 @@
+---
+title: "get_scene"
+description: "Fetch one scene by id over MCP; returns the scene or null."
+---
+
+Fetch one scene by id. The result is `null` if the scene does not exist or falls outside the caller's read scope.
+
+Dispatches to the `get_scene` internal service method.
+
+## Parameters
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `scene_id` | string | Yes | — | The scene UUID to fetch. |
+
+## Returns
+
+```json
+{ "scene": null }
+```
+
+Returned as the `structuredContent` payload. When the scene is visible, `scene` is the full scene object; otherwise it is `null`.
+
+## Example
+
+Request:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "get_scene",
+    "arguments": { "scene_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7" }
+  }
+}
+```
+
+Response:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": [
+      { "type": "text", "text": "{\"scene\":null}" }
+    ],
+    "structuredContent": { "scene": null },
+    "isError": false
+  }
+}
+```
+
+## Annotations
+
+The tool's MCP behaviour hints, as emitted in `tools/list` (advisory display metadata — see [the annotations contract](/mcp/overview#tool-annotations)):
+
+| `readOnlyHint` | `destructiveHint` | `idempotentHint` | `openWorldHint` |
+|---|---|---|---|
+| `true` | `false` | `true` | `false` |
+
+A pure read — writes nothing.
+
+## Related
+
+- [list_scenes](/mcp/tools/list-scenes) to enumerate visible scenes.

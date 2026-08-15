@@ -1,0 +1,58 @@
+---
+title: "Trust and provenance"
+description: "The adversarial-resilience layer — authenticated provenance, per-agent trust, and why one cannot substitute for the other."
+---
+
+Gossip propagation routes knowledge by relevance, and [layer promotion](/concepts/layer-promotion) grants reach based on how often knowledge is confirmed. Both of those are only safe if you can trust *who* a piece of knowledge came from. Trust and provenance is the layer that makes that guarantee. It has two parts that must be understood together: **authenticated provenance** and **per-agent trust scoring**.
+
+## Provenance is authenticated, never self-asserted
+
+Every memory diff carries a `source_agent`: the identity of the agent that produced it. This field is set from the **authenticated principal** of the request — never from a value the client puts in the request body.
+
+<Warning>
+A request that tries to assert a `source_agent` different from its authenticated identity is rejected as **Unauthorized**. You cannot speak as another agent. This is non-negotiable: the protocol layer derives `source_agent` from the authenticated connection and refuses any self-asserted override.
+</Warning>
+
+This is the foundation everything else rests on. If a client could claim any `source_agent` it liked, trust scores would be forgeable and contradiction handling could be gamed — an attacker could attribute bad knowledge to a trusted agent, or launder its own knowledge under a respected name. Authenticated provenance closes that door.
+
+## Trust gates promotion and can attenuate reach
+
+Each agent has a **trust score** in the range `[0, 1]`. A new or unseen agent starts at `initial_trust = 0.5`. That score does two things:
+
+- **It gates promotion.** A source whose trust is below the promotion threshold can never have its knowledge promoted up the hierarchy, regardless of delivery counts. The threshold is a config key — `trust.min_trust_to_promote`, default `0.4`. See [layer promotion](/concepts/layer-promotion).
+
+- **It can attenuate propagation energy — opt-in.** With `trust.energy_attenuation` enabled (default `false`), a diff's energy is scaled by the source's trust before it propagates:
+
+  ```text
+  adjusted_energy = diff_energy × trust
+  ```
+
+  A fully trusted source (`trust = 1.0`) gets full reach; a low-trust source's knowledge is damped so it spreads less far across the mesh. A stock deployment does **not** attenuate — the flag ships off because the energy model was calibrated at full reach. See [the energy model](/concepts/energy-model) for what energy controls.
+
+The score itself moves on evidence: a confirmed diff earns `trust.confirmation_reward` (default `0.02`), a contradicted one costs `trust.contradiction_penalty` (default `0.05`), with confirmation counted after `trust.confirm_n` (default `3`) agreeing observations. Together these mean a low-trust source can still contribute knowledge, but it cannot earn elevated, mesh-wide reach until the source has earned trust — and, where attenuation is enabled, its knowledge travels less far too.
+
+## Trust assumes authentication — it does not replace it
+
+This is the most important point on the page, and it is easy to get backwards.
+
+<Note>
+Trust scoring is a **mitigation that assumes authenticated provenance**. It is not a substitute for authentication. Trust answers "how much reach should this *known* agent's knowledge get?" It cannot answer "is this agent who it claims to be?" — only authentication can. Without authenticated `source_agent`, trust scores apply to a forgeable identity and provide no protection at all.
+</Note>
+
+So the two parts work as a chain: authentication establishes *who* the source is, and trust then decides *how much reach* that source has earned. Remove the first link and the second is meaningless.
+
+## A note on terminology you will see elsewhere
+
+Anywhere in these docs or the API that mentions provenance or `source_agent`, the same rule applies: it is the **authenticated** identity, never a client-supplied field. When you read about a diff's origin in [gossip propagation](/concepts/gossip-propagation) or a source's eligibility in [layer promotion](/concepts/layer-promotion), treat "source" as "authenticated source."
+
+## How this connects to the rest of the system
+
+Trust and provenance is the safety boundary around the rest of the mesh: it feeds the opt-in trust multiplier into [the energy model](/concepts/energy-model), the trust gate into [layer promotion](/concepts/layer-promotion), and the authenticated identity into every [propagated](/concepts/gossip-propagation) diff. For how authentication and access control are configured operationally, see [authorization](/operations/authorization); for the credential you present as an agent, see the credential step in the [quickstart](/quickstart).
+
+## Source
+
+This page is a teaching restatement of the HyphaeDB specifications. It does not define new behaviour.
+
+- [mesh-layer spec §6.5](https://github.com/hyphae-db/hyphae-core/blob/main/specs/mesh-layer.md) — per-agent trust, energy attenuation, and the promotion trust gate.
+- [protocol-layer spec §4 (FR-7 / invariants)](https://github.com/hyphae-db/hyphae-core/blob/main/specs/protocol-layer.md) — authenticated `source_agent`, rejection of self-asserted identities.
+- [identity-and-credentials spec](https://github.com/hyphae-db/hyphae-core/blob/main/specs/identity-and-credentials.md) — how the authenticated principal is established.

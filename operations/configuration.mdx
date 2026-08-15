@@ -1,0 +1,151 @@
+---
+title: Configuration
+description: Configure HyphaeDB through environment variables and a config file, and understand which settings are fixed for the process lifetime versus reloadable at runtime.
+---
+
+HyphaeDB reads its configuration from a config file merged with environment variables through
+`HyphaeConfig::from_env_and_file`. Environment variables take precedence, so you can ship a base
+config file and override per-deployment values from the environment.
+
+This page lists the environment surface, then explains which settings are **structural** (fixed for
+the life of the process) versus **non-structural** (reloadable with `SIGHUP`).
+
+## Environment variables
+
+| Variable | Required | Default | Meaning |
+|----------|----------|---------|---------|
+| `DATABASE_URL` | Yes | — | PostgreSQL connection string for the system of record (`pgvector` required). |
+| `HYPHAEDB_BOOTSTRAP_ADMIN` | On an empty registry | — | `name` (key minted + logged once) or `name:hyk_<kid>_<secret>`. Creates the first admin who can then issue credentials. A supplied key must be `hyk_<kid>_<secret>`-shaped or the server refuses to boot. |
+| `HYPHAE_API_KEY` | For `mcp-stdio` | — | The MCP stdio launch token, resolved through the secrets seam rather than read as raw env. |
+| `HYPHAEDB_GRPC_BIND` | No | `0.0.0.0:50051` | Address the gRPC listener binds. |
+| `HYPHAEDB_REST_BIND` | No | `0.0.0.0:8080` | Address the REST / WebSocket listener binds. |
+| `HYPHAEDB_MCP_STDIO` | No | unset | Set to `1` to run in MCP stdio mode (equivalent to `--stdio`). |
+| `HYPHAEDB_EMBEDDING_PROVIDER` | No | configured provider | `mock` (in-process dev/e2e), `tei` (sidecar), `openai`, `http`, or `candle` (local in-process — compiled into default builds; weights download at runtime). |
+| `HYPHAEDB_EMBEDDING_BASE_URL` | For `tei`/`http` | — | Endpoint root for the sidecar / OpenAI-compatible service (for example `http://tei:80`). Empty clears it. |
+| `HYPHAEDB_TELEMETRY_MODE` | No | `otlp` | Telemetry backend: `prometheus` serves a `/metrics` scrape on the REST port, `otlp` exports traces to a collector (and still serves `/metrics` unless the scrape is disabled in the config file), `stdout`, or `none`. The compose stack defaults to `prometheus`. |
+| `HYPHAEDB_SNAPSHOT_DIR` | No | unset | Enables mesh snapshots: the server checkpoints the in-memory graph here every 15 minutes and at graceful shutdown, so a restart replays only the post-snapshot delta instead of scanning the whole corpus. Unset = snapshots disabled (full rehydration only — slower, never lossy). |
+| `HYPHAEDB_DEPLOYMENT_PROFILE` | No | `dev` | `dev` or `production`. |
+| `HYPHAEDB_HA_ENABLED` | For a 2-replica pair | `false` | Leased active-passive failover: the boot takes a PostgreSQL advisory-lock lease; the loser runs as a zero-write standby and promotes automatically. Must be set on BOTH instances before scaling past one replica. |
+| `RUST_LOG` | No | config log filter | Standard `EnvFilter` directive; overrides the config file's filter. |
+
+Contradiction detection (see [the concept page](/concepts/contradiction-detection)) is configured
+through the config file's `contradiction` section rather than env vars: `enabled` (default
+`false`), the Stage-1 cosine band and Stage-2 confidence threshold, the classifier selection
+(`nli` — requires a build with the NLI feature — or `llm_judge`, unavailable in V1), and
+`max_concurrent_checks` (default 4 — a store burst beyond it skips detection for the excess
+stores rather than queueing). Enabling detection without a constructible classifier is a
+**boot error**, never a silent no-op. The trust consequences of a detection are tunable through
+the `trust` section below.
+
+<Note>
+On an empty registry the server fails closed without `HYPHAEDB_BOOTSTRAP_ADMIN` — it refuses to
+start rather than run with no administrator. Once an admin exists, the variable is no longer
+required on subsequent boots.
+</Note>
+
+## The `trust` section
+
+The mesh trust tunables live in the config file's `trust` section. Each is validated at boot
+(the score-shaped keys must be in `[0.0, 1.0]`):
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `trust.contradiction_penalty` | `0.05` | Trust lost when a source's diff is contradicted (floored at `0.0`). |
+| `trust.confirmation_reward` | `0.02` | Trust gained when a source's diff is confirmed (capped at `1.0`). |
+| `trust.min_trust_to_promote` | `0.4` | Minimum source trust required for a layer promotion. |
+| `trust.confirm_n` | `3` | Agreeing observations required to count a diff confirmed. |
+| `trust.energy_attenuation` | `false` | Opt-in trust→energy attenuation: when `true`, a diff's seed energy is scaled by its source's trust. Ships off — the energy calibration assumes full reach. |
+
+See [Trust and provenance](/concepts/trust-and-provenance) for what these control.
+
+## The `a2a` section
+
+The [A2A surface](/a2a/overview) is configured through the config file's `a2a` section. It is
+**off by default**: serving requires `a2a.enabled = true` **and** `a2a.public_url` set —
+`enabled = true` without a `public_url` is a boot error. In the `production` deployment profile
+`public_url` must be `https` (`http` is permitted in Dev only).
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `a2a.enabled` | `false` | Master switch; `true` requires `public_url` (boot error otherwise). |
+| `a2a.public_url` | unset | Canonical public base URL; the agent card advertises `{public_url}/a2a/v1`. Must be `https` in Production, `http` Dev-only. |
+| `a2a.agent_name` | `"hyphaedb"` | The self-card `name`. |
+| `a2a.provider_organization` / `a2a.provider_url` | unset | The self-card `provider` — omitted unless `provider_organization` is set; `provider_url` rides along when present. |
+| `a2a.max_message_bytes` | `262144` | Request-body cap, enforced at the transport **before** authentication. |
+| `a2a.max_parts` | `16` | Max parts per inbound message. |
+| `a2a.default_recall_k` | `8` | Default `k` for the recall/query skills. |
+| `a2a.max_push_configs_per_task` | `4` | Push-notification-config count cap per task. |
+| `a2a.task_retention_days` | `30` | Terminal-task GC retention (`0` disables the terminal cut). |
+| `a2a.subscribe_poll_secs` | `1` | Poll interval for `tasks/{id}:subscribe`. |
+| `a2a.max_streams_per_principal` | `8` | Open SSE stream cap per principal. |
+
+## A worked example
+
+This starts the server in daemon mode against a local PostgreSQL instance and creates the first admin:
+
+```bash
+DATABASE_URL='postgres://hyphae:hyphae@localhost:5432/hyphae' \
+HYPHAEDB_BOOTSTRAP_ADMIN='ops-admin' \
+cargo run --bin hyphae-server
+```
+
+The server binds gRPC on `0.0.0.0:50051` and REST/WebSocket on `0.0.0.0:8080`.
+
+## Structural versus non-structural config
+
+Some settings define the shape of the in-memory mesh and the stored vectors. Changing them
+invalidates the existing graph, so they are **fixed for the process lifetime**:
+
+- HNSW dimensions
+- The embedding model and provider
+- The storage backend
+
+To change any of these, run the re-embed migration (see [/operations/data-lifecycle](/operations/data-lifecycle))
+and restart the process.
+
+A closed set of **non-structural** tunables reloads live on `SIGHUP` (the reloader re-reads the
+same config file the process booted with — pass one with `--config`):
+
+| Reloadable on `SIGHUP` today | Effect |
+|------------------------------|--------|
+| `gossip.sigma_min`, `gossip.k_neighbors` | The next gossip hop reads the new values — even a propagation already in flight. |
+| Retention TTLs (`retention.delivery_retention_secs`, `retention.diff_retention_secs`, `retention.cell_idle_eviction_secs`) | The next GC / eviction pass uses them. |
+
+Two more tunables are in the spec's reloadable set but have no live consumer in this build yet —
+the log filter and the trace sample ratio. A `SIGHUP` that changes one is **rejected with an
+explicit "no live consumer — restart to apply" message** rather than silently accepted, so you are
+never misled into thinking an inert change went live.
+
+The anti-entropy **sweep interval** (`sweep.interval_seconds`) *does* have a live consumer — the
+sweep loop — but it reads the value once at boot, so changing it is **restart-required** (a
+`SIGHUP` is rejected with that message). Setting it to `0` disables the sweep loop entirely
+(logged at boot); eventual consistency then rests on gossip propagation alone.
+
+The reload is **all-or-nothing**: the reloader re-runs the exact boot-time config load (so a config
+that would not boot never replaces the running one), diffs every field, and if *any* changed field
+falls outside the reloadable set it applies **nothing** — structural fields get a
+migrate-and-restart message, everything else a plain restart-required message. Reject messages name
+config paths only, never values, so a database DSN can never leak into logs.
+
+<Warning>
+A `SIGHUP` that tries to change a structural field — for example switching the embedding provider —
+is rejected with a config error and changes nothing. The running engine stays as it was; migrate
+and restart instead.
+</Warning>
+
+## Signals
+
+| Signal | Behavior |
+|--------|----------|
+| `SIGHUP` | Reload non-structural config only (see above). Registered at the very start of boot, so a reload signal arriving while the server is still rehydrating is buffered, not fatal. |
+| `SIGTERM` / `SIGINT` | Drain gracefully: `/readyz` flips to 503 (the load balancer pulls the instance while in-flight requests finish), new gossip stops being admitted while in-flight walks complete, the mesh is checkpointed to the snapshot volume (when configured), the servers stop, and the pool closes last. A **second** signal during the drain forces an immediate exit. |
+
+For the full drain sequence and the operational model around it, see
+[/operations/deployment-operations](/operations/deployment-operations).
+
+## Source
+
+This page reflects the configuration and signal behavior in the
+[deployment-operations spec](https://github.com/hyphae-db/hyphae-core/blob/main/specs/deployment-operations.md)
+and the staged rollout in the
+[build-sequence spec](https://github.com/hyphae-db/hyphae-core/blob/main/specs/11-build-sequence.md).

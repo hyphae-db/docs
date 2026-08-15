@@ -1,0 +1,97 @@
+---
+title: "gRPC overview"
+description: "The Hyphae gRPC service — eleven unary RPCs plus a bidirectional inbox stream over the same application core as REST and MCP."
+---
+
+gRPC is the primary protocol surface for HyphaeDB. The same application core also serves [REST](/api-reference/overview), [MCP](/mcp/overview), and — opt-in — [A2A](/a2a/overview); gRPC is the lowest-overhead way to reach it and the surface the [Rust](/sdks/rust), [Python](/sdks/python), and [TypeScript](/sdks/typescript) SDKs are built on.
+
+This page is a conceptual guide. It does not hand-document every message — the proto files are the source of truth.
+
+<Card title="View the proto definitions" icon="github" href="https://github.com/hyphae-db/hyphae-core/tree/main/proto/hyphaedb/v1">
+  `proto/hyphaedb/v1/` — package `hyphaedb.v1`, across `service.proto`, `nodes.proto`, `gossip.proto`, and `query.proto`.
+</Card>
+
+## The service
+
+All RPCs live on one service, `hyphaedb.v1.Hyphae`. It exposes eleven unary RPCs plus one bidirectional stream.
+
+### Unary RPCs
+
+| RPC | Request → Response | Notes |
+|-----|--------------------|-------|
+| `Info` | `Empty` → `ServerInfo` | Version and capability set. The unauthenticated handshake an SDK runs at connect to negotiate compatibility. |
+| `Store` | `StoreRequest` → `StoreResponse` | Persist a cell; returns its `node_id`. |
+| `Recall` | `RecallRequest` → `NodeList` | Vector recall by query text; returns fully hydrated nodes in rank order. |
+| `Query` | `QueryRequest` → `NodeList` | Structured query; returns fully hydrated nodes. |
+| `StartSession` | `StartSessionRequest` → `SessionRef` | Open a session for the authenticated agent. |
+| `EndSession` | `SessionRef` → `Empty` | Close a session. |
+| `PlaceBeacon` | `PlaceBeaconRequest` → `BeaconRef` | Place a standing-interest beacon. |
+| `ListBeacons` | `Empty` → `BeaconList` | List the caller's beacons. |
+| `ListScenes` | `ProjectRef` → `SceneList` | List scenes in the caller's read scope. |
+| `GetScene` | `SceneRef` → `Scene` | Fetch one scene. |
+| `ConsolidateScene` | `SceneRef` → `ConsolidationReport` | Consolidate a scene. gRPC/REST only — **not** an MCP tool. |
+
+<Note>
+`ConsolidateScene` is available over gRPC and [REST](/api-reference/overview) but is intentionally not exposed as an [MCP tool](/mcp/overview). It is a maintenance operation rather than an agent-facing memory operation.
+</Note>
+
+### The inbox stream
+
+```protobuf
+rpc Inbox(stream InboxRequest) returns (stream InboxItem);
+```
+
+`Inbox` is how an agent receives knowledge that [propagates](/concepts/gossip-propagation) to its node. The exchange is asymmetric: the client sends exactly one `InboxRequest` to open the stream, then the server pushes `InboxItem`s for as long as the stream stays open.
+
+The single request carries a `last_seen` watermark (an RFC 3339 timestamp):
+
+- Send it **empty** to replay your full delivery history first — everything that ever reached your node or your beacons — before live delivery begins.
+- On reconnect, send your last processed watermark. The server replays the items you missed, then transitions to live delivery.
+
+The stream is scoped to you as an agent — deliveries to your own node and to beacons you own: it carries a cross-agent filter so you only receive your own deliveries, and items are de-duplicated so a replay overlap never surfaces the same diff twice.
+
+## Authentication
+
+Every RPC except the `Info` handshake is authenticated per call by the `x-hyphae-key` metadata header. Identity is resolved from that credential and never read from the request body, so a client cannot assert another agent's identity (INV-5).
+
+```text
+metadata:
+  x-hyphae-key: hyk_<kid>_<secret>
+```
+
+A quick unauthenticated handshake with `grpcurl`:
+
+```bash
+grpcurl -plaintext localhost:50051 hyphaedb.v1.Hyphae/Info
+```
+
+And an authenticated unary call, passing the key as metadata:
+
+```bash
+grpcurl -plaintext \
+  -H 'x-hyphae-key: hyk_...' \
+  -d '{"text":"storage engine","k":5}' \
+  localhost:50051 hyphaedb.v1.Hyphae/Recall
+```
+
+## Health checks
+
+The standard `grpc.health.v1.Health` service is registered alongside `Hyphae`, so any gRPC health-checking client or load balancer can probe the server without going through the application API.
+
+## Versioning
+
+The `Info` RPC returns the server version and its advertised capability tokens. SDKs use this at connect to enforce a minimum supported server version and to gate features that depend on a capability the server may not have. The proto package is `hyphaedb.v1`; breaking changes ship under a new package version. See [API versioning](/operations/api-versioning) for the compatibility policy and deprecation process.
+
+## Related pages
+
+- [Rust SDK](/sdks/rust) — the gRPC-native client.
+- [MCP tools](/mcp/overview) — the agent-facing tool surface over the same core.
+- [API reference](/api-reference/overview) — the REST surface and its conventions.
+- [Gossip propagation](/concepts/gossip-propagation) — what the `Inbox` stream delivers.
+
+## Source
+
+This page restates the protocol layer and proto schema; it defines no new behavior.
+
+- [protocol-layer spec §5.5, §6](https://github.com/hyphae-db/hyphae-core/blob/main/specs/protocol-layer.md) — the gRPC service, auth, and the inbox stream.
+- [`proto/hyphaedb/v1/`](https://github.com/hyphae-db/hyphae-core/tree/main/proto/hyphaedb/v1) — the canonical message and service definitions.

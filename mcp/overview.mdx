@@ -1,0 +1,149 @@
+---
+title: "MCP tools overview"
+description: "How HyphaeDB exposes its memory engine to MCP agents as 11 JSON-RPC tools over stdio and HTTP."
+---
+
+MCP-native agents — Claude Code, Cursor, Cline — get shared memory that routes knowledge to them: store a memory as a tool call and the mesh gossips it to the agents it is relevant to, no query in between. The MCP server exposes that engine as tool calls instead of gRPC. The MCP surface is one of four protocol surfaces over the same application core; see [gRPC](/grpc/overview), the [REST API reference](/api-reference/overview), and — opt-in — [A2A](/a2a/overview) for the others.
+
+The server is hand-rolled JSON-RPC 2.0 (no MCP SDK, no protobuf). It implements three methods — `initialize`, `tools/list`, and `tools/call` — and exposes exactly 11 tools. Each tool dispatches to one internal service method.
+
+## Transports
+
+The same dispatch core runs over two transports:
+
+| Transport | How it runs | Authentication |
+|-----------|-------------|----------------|
+| stdio | `serve_mcp_stdio` — one process per agent, reading/writing JSON-RPC on stdin/stdout | A process-fixed launch token read once from the `HYPHAE_API_KEY` environment variable |
+| MCP over HTTP | `POST /mcp` on the REST server | A per-request `x-hyphae-key` header |
+
+Over stdio the identity is fixed for the life of the process: the launch token is resolved once at startup into an authenticated principal and reused for every `tools/call`. Over HTTP each request carries its own `x-hyphae-key` and is authenticated independently.
+
+Over HTTP, `POST /mcp` also enforces the `2025-06-18` requirement on the `MCP-Protocol-Version` header: an invalid or unsupported value is rejected with `400`, while an absent header is accepted — the backwards-compatibility path for pre-`2025-06-18` clients. stdio has no headers, so the requirement is inapplicable there.
+
+### Connecting Claude Code over stdio
+
+Claude Code launches the server as a subprocess and talks to it over stdio. Point your MCP client at the HyphaeDB server binary and set `HYPHAE_API_KEY` in its environment. The token you provide is the agent's identity for every call made in that session — there is no per-call identity argument.
+
+## The 11 tools
+
+<CardGroup cols={2}>
+  <Card title="store" href="/mcp/tools/store">Store a memory cell; the server embeds it and gossips it.</Card>
+  <Card title="recall" href="/mcp/tools/recall">Find the k nearest cells to a query at layer L0.</Card>
+  <Card title="query" href="/mcp/tools/query">Like recall, but against an explicit semantic layer.</Card>
+  <Card title="start_session" href="/mcp/tools/start-session">Open a working session in a project.</Card>
+  <Card title="end_session" href="/mcp/tools/end-session">Close a session by id.</Card>
+  <Card title="place_beacon" href="/mcp/tools/place-beacon">Place a standing interest so matching diffs gossip to you.</Card>
+  <Card title="list_beacons" href="/mcp/tools/list-beacons">List the beacons you own.</Card>
+  <Card title="inbox" href="/mcp/tools/inbox">Drain the diffs gossiped to you since a timestamp.</Card>
+  <Card title="get_scene" href="/mcp/tools/get-scene">Fetch one scene by id.</Card>
+  <Card title="list_scenes" href="/mcp/tools/list-scenes">List the scenes in your read scope.</Card>
+  <Card title="pull_inbox" href="/mcp/tools/pull-inbox">Drain your inbox page by page against a server-owned cursor.</Card>
+</CardGroup>
+
+## Tool annotations
+
+Every one of the 11 tool descriptors carries all four MCP `ToolAnnotations` behaviour hints — `readOnlyHint`, `destructiveHint`, `idempotentHint`, and `openWorldHint` — each stated explicitly on every tool, never omitted. MCP's defaults for an absent hint are worst-case (`destructiveHint: true`, `openWorldHint: true`), so omitting them would make hosts treat six pure reads as destructive and open-world; stating all four keeps host UX honest.
+
+The hints are **advisory only** — display and UX metadata for hosts and models. No authorization decision anywhere in the server reads them; access control stays in the memory-service facade. `openWorldHint` is `false` for all 11 tools: every tool operates on one closed domain — this deployment's own memory store, scoped to the authenticated principal. Each per-tool page lists its four values.
+
+## Identity is authenticated, never self-asserted
+
+Tool argument schemas deliberately omit `source_agent` and `tenant_id`. The server stamps identity from the authenticated principal — the launch token over stdio, or the `x-hyphae-key` header over HTTP. A client cannot claim to be another agent (docs-site INV-5: `source_agent` is authenticated, never self-asserted). This is the precondition that makes trust scoring and provenance meaningful downstream; see [Trust and provenance](/concepts/trust-and-provenance).
+
+## recall and query return ids, not content
+
+Over MCP, [`recall`](/mcp/tools/recall) and [`query`](/mcp/tools/query) return only `{node_id, distance}` pairs — not hydrated cell content. To read a cell's content, follow up over a hydrating surface. The [REST API](/api-reference/overview) returns full nodes; MCP does not.
+
+## consolidate_scene is not an MCP tool
+
+`consolidate_scene` is a heavyweight maintenance operation and is intentionally available over [gRPC](/grpc/overview) and [REST](/api-reference/overview) only — it is not one of the 11 MCP tools. The MCP roster is exactly the 11 tools above.
+
+## Output convention
+
+Every successful `tools/call` returns the same envelope: a text content block carrying the result as a JSON string, plus a `structuredContent` mirror of the same payload, with `isError: false`.
+
+```json
+{
+  "content": [{ "type": "text", "text": "<json string>" }],
+  "structuredContent": { "node_id": "..." },
+  "isError": false
+}
+```
+
+A facade error becomes a JSON-RPC error object (not an `isError: true` content block), so structured error codes are preserved. The per-tool pages document the `structuredContent` payload as the result.
+
+## Example: list tools
+
+Request:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/list",
+  "params": {}
+}
+```
+
+Response (abridged):
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "tools": [
+      {
+        "name": "store",
+        "description": "Store a memory cell. ...",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "content": { "type": "string" },
+            "cell_type": { "type": "string", "enum": ["Decision", "Constraint", "..."] }
+          },
+          "required": ["content", "cell_type"]
+        }
+      }
+    ]
+  }
+}
+```
+
+## Example: call a tool
+
+Request:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tools/call",
+  "params": {
+    "name": "store",
+    "arguments": {
+      "content": "Use pgvector for the V1 storage backend.",
+      "cell_type": "Decision",
+      "salience": 0.9
+    }
+  }
+}
+```
+
+Response:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "content": [
+      { "type": "text", "text": "{\"node_id\":\"6f9619ff-8b86-d011-b42d-00cf4fc964ff\"}" }
+    ],
+    "structuredContent": { "node_id": "6f9619ff-8b86-d011-b42d-00cf4fc964ff" },
+    "isError": false
+  }
+}
+```
+
+The `initialize` handshake precedes either example. The server **negotiates** the protocol revision rather than pinning one: it supports `2025-11-25`, `2025-06-18`, `2025-03-26`, and `2024-11-05`, newest first. When the client requests a revision in that set, the server echoes it back; for anything else (or an absent version), the server answers with its newest, `2025-11-25`. A host pinned to `2024-11-05` keeps working unchanged — annotations are simply unknown fields to it, and unknown fields are ignored. Alongside the negotiated version, the reply carries a `tools` capability and `serverInfo`.

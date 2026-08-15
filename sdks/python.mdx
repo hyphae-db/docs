@@ -1,0 +1,209 @@
+---
+title: Python SDK
+description: Async gRPC client for HyphaeDB — connect, store and recall memory, and consume the live gossip inbox from Python.
+---
+
+The Python SDK (`hyphaedb`) is the thin smart client your agent imports to talk to a HyphaeDB
+server. It is fully async and gRPC-only: it wraps the wire contract and keeps a warm local read
+cache (your inbox of gossip deliveries plus scene summaries) so `recall` serves from cache first
+and only round-trips the server on a miss. It contains no mesh logic — gossip, the energy model,
+and layer promotion all live server-side. See [the client SDK concepts](/concepts/gossip-propagation)
+for what the inbox delivers.
+
+## Install
+
+The package is `hyphaedb` and requires Python 3.10 or newer.
+
+```bash
+pip install hyphaedb
+```
+
+## Connect and authenticate
+
+Every call authenticates with your full API key — the whole `hyk_...` string. You pass it as the
+second argument to `connect`, and the SDK sends it verbatim as the `x-hyphae-key` gRPC metadata
+header on every RPC. The SDK never parses the key.
+
+<Note>
+Identity is bound once, at connect, from the authenticated key. The SDK never self-asserts
+`source_agent`: there is no method parameter that lets a caller claim to be another agent (the
+server stamps authorship from the key principal). This is a security invariant (INV-4 in the SDK
+spec) enforced structurally — `CellInput` simply has no `source_agent` field.
+</Note>
+
+See [the quickstart](/quickstart) for how to obtain a `hyk_...` credential.
+
+<Steps>
+  <Step title="Get your API key">
+    Obtain a `hyk_...` key for your agent (see [the quickstart](/quickstart)). Keep it secret —
+    it is the only credential the SDK needs.
+  </Step>
+  <Step title="Connect">
+    `connect` opens the channel, runs the version-negotiation handshake, and returns a ready
+    client. `endpoint` is a `host:port` such as `localhost:50051`.
+
+    ```python
+    from hyphaedb import HyphaeClient
+
+    client = await HyphaeClient.connect("localhost:50051", "hyk_your_key_here")
+    ```
+  </Step>
+  <Step title="Start a session">
+    `start_session` opens the live inbox stream and warms the scene cache. The argument is your
+    agent's identity label.
+
+    ```python
+    session = await client.start_session("my-agent")
+    ```
+  </Step>
+</Steps>
+
+## Quickstart
+
+A single end-to-end flow: connect, start a session, store a cell, recall it, consume one inbox
+delivery, then close.
+
+```python
+import asyncio
+
+from hyphaedb import HyphaeClient, CellInput, CellType, RecallQuery
+
+
+async def main() -> None:
+    # auth is the whole hyk_... key; it rides every RPC as x-hyphae-key and is never parsed.
+    client = await HyphaeClient.connect("localhost:50051", "hyk_your_key_here")
+    await client.start_session("my-agent")  # opens the live inbox stream
+
+    node_id = await client.store(
+        CellInput(cell_type=CellType.DECISION, content="We ship on Friday", salience=0.9)
+    )
+    print("stored", node_id)
+
+    hits = await client.recall(RecallQuery(text="ship", k=5))  # cache-first, server on miss
+    for hit in hits:
+        print(hit.score, hit.from_cache, hit.content)
+
+    async for item in client.inbox():  # deduped gossip deliveries, live
+        print("delivered", item.delivery.diff_id)
+        break
+
+    await client.close()
+
+
+asyncio.run(main())
+```
+
+`HyphaeClient` is also an async context manager, so `async with await HyphaeClient.connect(...) as
+client:` closes it for you on exit.
+
+## API reference
+
+### connect
+
+```python
+await HyphaeClient.connect(
+    endpoint: str,
+    auth: str,
+    config: ClientConfig | None = None,
+) -> HyphaeClient
+```
+
+Opens the channel, runs the unauthenticated `Info` version-negotiation handshake, binds identity
+from `auth`, and returns a ready client. Raises `ConnectError` if the channel never comes up, if the
+handshake fails, or if the server is below the SDK's minimum supported version.
+
+### store
+
+```python
+await client.store(cell: CellInput) -> str
+```
+
+Persists a cell and returns the server `node_id`. The SDK mints one idempotency key per logical call
+and replays it on a transport-error retry, so a retry returns the original `node_id` rather than a
+duplicate. `salience` is validated to `[0.0, 1.0]` client-side before any RPC.
+
+### recall
+
+```python
+await client.recall(query: RecallQuery) -> list[RecallHit]
+```
+
+Cache-first recall: scans the local inbox buffer first and falls back to the server only on a miss
+(or when short of `k`). When the cache and the server return the same content, the server copy wins.
+
+### start_session
+
+```python
+await client.start_session(agent_id: str) -> Session
+```
+
+Opens a session for the authenticated agent, starts the background gossip stream, and warms the
+scene cache. `agent_id` is your identity label; it is threaded as the session scope, never asserted
+as `source_agent`.
+
+### place_beacon
+
+```python
+await client.place_beacon(interest: str) -> str
+```
+
+Places a standing-interest beacon and returns its `node_id`. The owner is the session agent, never
+caller-asserted. Beacons shape what the mesh routes to you — see
+[positioning and beacons](/concepts/positioning-and-beacons).
+
+### inbox
+
+```python
+client.inbox() -> AsyncIterator[InboxItem]
+```
+
+A live, reconnecting async iterator over gossip deliveries. Each `InboxItem` is yielded at most once
+(deduped by `diff_id`) across the live stream and any number of reconnect replays. The iterator never
+hangs: on a clean `close()` it returns, and on a fatal (non-transport) stream error it raises a typed
+error. Read `item.delivery.diff_id` for the delivery identity. See
+[gossip propagation](/concepts/gossip-propagation) for what flows down this stream.
+
+### close
+
+```python
+await client.close() -> None
+```
+
+Stops the receive loop and closes the channel, unblocking any consumer parked in `inbox()`.
+
+### Types
+
+```python
+CellInput(
+    cell_type: CellType,
+    content: str,
+    scene_id: str | None = None,
+    salience: float = 0.5,
+)
+
+RecallQuery(
+    text: str,
+    k: int = 0,                       # 0 ⇒ use ClientConfig.recall_default_k
+    cell_types: list[CellType] | None = None,
+    scene_id: str | None = None,
+    include_inbox: bool = True,
+)
+
+RecallHit(node_id: str, content: str, cell_type: CellType, score: float, from_cache: bool)
+```
+
+`CellType` is an enum with the nine calibrated values: `DECISION`, `CONSTRAINT`, `RISK`, `PATTERN`,
+`LESSON`, `FACT`, `PREFERENCE`, `CONTEXT`, `TASK` (plus an `UNSPECIFIED` sentinel a newer server's
+unknown value decodes to). Tune buffer sizes, reconnect backoff, and the heartbeat timeout with
+`ClientConfig`.
+
+## Version negotiation
+
+<Note>
+At connect the SDK calls the unauthenticated `Info` RPC to learn the server's version and
+capabilities. If the server is below the SDK's minimum supported version, `connect` raises
+`ConnectError` and returns no client. After connecting, read `client.server_version()` and gate
+optional, newer-than-floor features on `client.has_capability(token)` so the SDK degrades gracefully
+against an older server. See [API versioning](/operations/api-versioning) for the compatibility
+rules.
+</Note>

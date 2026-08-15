@@ -1,0 +1,75 @@
+---
+title: "A2A overview"
+description: "HyphaeDB's Agent2Agent surface — enablement, the standard agent card, versioning, and authentication for reaching shared memory over A2A."
+---
+
+Agents on an A2A platform get the same thing every HyphaeDB surface provides: **shared memory that
+routes knowledge to them**. A memory stored through A2A becomes a diff that gossips across the mesh
+to the agents it is relevant to, exactly as one stored over [gRPC](/grpc/overview),
+[MCP](/mcp/overview), or [REST](/api-reference/overview) — A2A is a fourth door into the same
+organism, for platforms whose native interop is the Agent2Agent protocol.
+
+<Note>
+**Status: live, opt-in.** The A2A surface serves the standard agent card, the four
+[memory skills](/a2a/memory-skills), [task reads, SSE streaming, and push-notification-config
+storage](/a2a/tasks-and-streaming) today. It is **off by default** (`a2a.enabled: false`).
+Push-notification **delivery** does not exist yet: configs are stored and managed only, and
+outbound delivery belongs to agent activation, a proposed, unbuilt component.
+</Note>
+
+## Enabling the surface
+
+The surface is served only when two config keys are both set: `a2a.enabled = true` **and**
+`a2a.public_url` — enabling without a public URL is a boot error, and while the surface is off its
+routes are absent entirely (a `404`, not a `403`). In the `production` deployment profile
+`public_url` must be `https`; `http` is permitted in Dev only. See
+[the `a2a` config section](/operations/configuration#the-a2a-section) for the full key table, and
+note that every example on these pages presumes an operator has enabled the surface.
+
+## Discovery: the agent card
+
+The server describes itself with a self-card at the A2A standard well-known path:
+
+```text
+GET /.well-known/agent-card.json
+```
+
+One path, no alias — and it is **unauthenticated by design**: the card is how a conformant A2A
+client finds the surface in the first place. Every other A2A route requires authentication.
+
+The card's `supportedInterfaces` carry the HTTP+JSON interface at `{public_url}/a2a/v1`, the base
+all A2A method paths resolve against. Its `securityRequirements` are honest: they are derived from
+the authentication providers actually enabled on this server, so the card never advertises a scheme
+the deployment cannot verify.
+
+## Version
+
+The pin is **A2A v1.0.1**. Every A2A response carries the wire header exactly:
+
+```text
+A2A-Version: 1.0
+```
+
+— the `major.minor` of the pinned release.
+
+## Authentication and identity
+
+A2A requests authenticate with the same `x-hyphae-key` principals as every other surface — there is
+no separate A2A credential. Provenance (`source_agent`, `tenant_id`) is stamped from the
+authenticated principal, and a request that smuggles `source_agent`, `tenant_id`, `agent_id`, or
+`principal` fields into its payload is rejected as `Unauthorized` before any memory operation runs.
+See [Trust and provenance](/concepts/trust-and-provenance) for why that rule is load-bearing.
+
+## Capability discovery
+
+SDK clients learn whether A2A is available the same way they learn about every optional feature:
+the `"a2a"` capability token appears in `ServerInfo` **only when the surface is actually served** —
+a disabled surface never advertises it. See [API versioning](/operations/api-versioning).
+
+## The three pages in this section
+
+- [Memory skills](/a2a/memory-skills) — `remember`, `recall`, `query`, `share`, and what completes
+  a `share` task.
+- [Tasks & streaming](/a2a/tasks-and-streaming) — task reads and cancel, SSE streaming, and
+  push-notification-config storage.
+- [Configuration](/operations/configuration#the-a2a-section) — the `a2a` config keys and defaults.

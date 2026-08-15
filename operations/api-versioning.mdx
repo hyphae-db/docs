@@ -1,0 +1,98 @@
+---
+title: API versioning
+description: How HyphaeDB versions its wire contract — semantic versioning split on the proto package boundary, bidirectional compatibility, capability negotiation, and deprecation signaling.
+---
+
+The SDKs version independently of the server and regenerate from the proto contract, so independent
+versioning is only safe with a written compatibility contract. HyphaeDB adopts **semantic API
+versioning split across the proto package boundary**, a bidirectional compatibility guarantee,
+capability negotiation, and a deprecation policy.
+
+## The versioning scheme
+
+The public API version is `MAJOR.MINOR`, reported by the `info` handshake as `MAJOR.MINOR.PATCH`
+(currently `1.0.0`):
+
+- **Major** is the **proto package** — `hyphaedb.v1`, later `hyphaedb.v2`. A new major is a new package
+  path, and the two **coexist** in the running server; `v2` does not delete `v1`. A major bump is the
+  only place a breaking change is allowed.
+- **Minor** is **additive within a major** — new optional fields, new RPCs, new enum variants. A minor
+  never removes or repurposes anything a conformant older client depends on.
+- **Patch** is implementation-only and carries no wire-surface meaning.
+
+The server version is independent of every SDK version. An SDK at `1.3.x` and a server at `1.5.x` are
+both major 1 and must interoperate.
+
+## Bidirectional compatibility
+
+| Direction | Pairing | Behavior |
+|-----------|---------|----------|
+| Forward | Old client, new server | The server serves the call and requires no field, RPC, or enum variant added after the client's minor. Response fields the old client does not know are ignored. |
+| Backward | New client, old server | The client degrades gracefully — any feature added after the server's minor is capability-gated and skipped when the handshake shows the server lacks it. |
+
+Two version floors make this concrete:
+
+- `minimum_supported_client_version` — a server-side floor (the oldest client minor it will serve).
+- `minimum_supported_server_version` — an SDK-side floor; the SDK refuses to connect to an older
+  server with a clear connect error and capability-gates anything newer.
+
+## Unknown enum variants
+
+Proto3 gRPC enums are integers on the wire, so an unknown variant arrives as a bare tag with no
+discriminator. To survive a newer server's enum variants without aborting:
+
+- Every proto enum reserves `*_UNSPECIFIED = 0` as a sentinel — never a real domain variant.
+- An unrecognized enum integer decodes to a language-level `Unknown(i32)` carrying the raw tag, not a
+  panic or decode error.
+- Over MCP and REST JSON, an unknown variant uses a string-discriminator fallback.
+
+The two transports differ on the wire but behave identically — neither aborts, both degrade
+gracefully.
+
+## Capability negotiation
+
+On connect, each SDK calls `info` once and stores the returned capability set on the session: the
+server's version, its minimum supported client minor, and a list of **capability tokens** for optional
+features. The SDK gates optional features on token presence — a feature absent from an older server's
+set is simply not attempted.
+
+The server currently advertises these tokens (the set is additive and may grow):
+
+| Token | Feature |
+|-------|---------|
+| `unary` | The core unary RPCs. |
+| `gossip.inbox` | Inbox delivery. |
+| `gossip.beacons` | Beacons. |
+| `scenes` | Scenes. |
+| `consolidation` | Consolidation. |
+| `a2a` | The [A2A surface](/a2a/overview). Advertised **only when the surface is actually served** (`a2a.enabled` plus `a2a.public_url`) — unlike the always-present tokens above, its presence tracks the deployment's runtime gate. |
+
+Capability tokens are additive — a token is never removed within a major.
+
+## Deprecation and sunset
+
+A field or RPC may be marked deprecated but **stays functional for at least two minor releases** within
+its major; removal happens only at the next major. While a deprecated surface is in use, the server
+emits a machine-readable signal, and the SDK surfaces a one-time deprecation warning without failing
+the call:
+
+| Transport | Signal |
+|-----------|--------|
+| gRPC | A `hyphae-deprecation` response header. |
+| REST | RFC 8594 `Deprecation` and `Sunset` headers. |
+| MCP | A `deprecation` field in the tool result `_meta`. |
+
+<Note>
+Deprecated surfaces keep working. The signal is advisory — it tells an operator to migrate before the
+next major removes the surface, without breaking the current call.
+</Note>
+
+For the wire surface these guarantees protect, see [/grpc/overview](/grpc/overview); for how each SDK
+applies them, see [/sdks/python](/sdks/python), [/sdks/typescript](/sdks/typescript),
+[/sdks/go](/sdks/go), and [/sdks/rust](/sdks/rust).
+
+## Source
+
+This page is a teaching restatement of the
+[api-versioning spec](https://github.com/hyphae-db/hyphae-core/blob/main/specs/hyphae-api-versioning.md);
+that spec is authoritative for any detail here.

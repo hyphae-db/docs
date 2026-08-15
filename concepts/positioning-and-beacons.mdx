@@ -1,0 +1,112 @@
+---
+title: "Positioning and beacons"
+description: "How agents take up a position in the mesh that drifts with their work, and how beacons let you plant a listening post at a topic and receive it from anywhere."
+---
+
+Agents are not outside observers of the mesh — they are nodes inside it. Where an agent sits in [the HNSW mesh](/concepts/hnsw-mesh) determines what knowledge reaches it during [gossip propagation](/concepts/gossip-propagation). This page covers the two ways an agent occupies the mesh: a **position** that moves with its work, and **beacons** that stay fixed at a topic of your choosing.
+
+## An agent's position
+
+An agent's position is the **time-decayed, salience-weighted centroid of its recent work**. As the agent stores and receives knowledge, the centre of that recent activity shifts, and the agent's node *drifts* through the mesh to follow it (the HyphaeDB whitepaper, Equation 2). An agent that has been working on storage internals sits near storage topics; if it pivots to networking, its position gradually migrates toward networking.
+
+Drift is gradual and lazy on purpose. Each recent cell contributes to the centroid with a weight that combines its salience and an exponential time decay, so newer, more important work pulls the position harder than old, minor work. The position is only re-embedded — an actual write into the mesh — when the drift distance from the current position crosses `drift_threshold`. Below that threshold, nothing is rewritten, which keeps the agent from thrashing the graph on every small update.
+
+<Tip>
+Because position follows recent work automatically, an agent tends to receive knowledge relevant to what it is doing *right now*, without subscribing to anything. Just keep working, and the mesh keeps you in the right neighbourhood.
+</Tip>
+
+## Beacons: a listening post at a topic
+
+Position follows your recent work, which means an agent receives what it happens to be near *right now*. But often you need the opposite: to reliably receive **everything about a topic, indefinitely**, even when your day-to-day work has moved somewhere else entirely. That is what a **beacon** is for.
+
+The mental model that keeps you out of trouble: **a beacon is a listening post you plant at a topic.** You call `place_beacon(interest)`; the server embeds the interest text and inserts a beacon node into the mesh **at that topic's position** — not at your agent's position. The beacon then sits in the topic's neighbourhood and catches knowledge that propagates near it, and each delivery is streamed to **you**, the owner, wherever your own agent node happens to be.
+
+Two properties make the listening post reliable:
+
+- `activation_threshold = 0.7` — the beacon only surfaces a diff whose relevance clears this bar (more on this below). It is a *stricter* gate than ordinary forwarding.
+- It never drifts and is never evicted. A beacon's position is **fixed for its life** — it is excluded from the position update that makes agents drift — and the eviction primitive never removes it. What you place stays exactly where you put it for as long as it exists.
+
+## You and your beacon sit in different places
+
+This is the part that is easy to get wrong, and the reason a beacon is more than "a subscription."
+
+Your agent node has a position (its recent-work centroid). Your beacon has a *different* position — the embedding of the interest you named. These are **decoupled**. Your agent can be working deep in frontend code while your beacon stands over in auth-configuration space. When a diff about auth-config propagates and reaches the beacon, the delivery is streamed to you — even though your agent node is nowhere near auth-config, and you never issued a query or moved there.
+
+<Note>
+This owner⇎position decoupling is *how* a topic reaches an agent that isn't positioned near it. It is not the forwarding score doing something clever — it is the beacon being planted at the topic and forwarding to its owner. A beacon is a fixed address for a topic; you are the moving reader it reports to.
+</Note>
+
+## What has to be true for a beacon to catch a diff
+
+A beacon is a receiver, not a magnet. Two independent things have to hold for a stored memory to land in your inbox through a beacon:
+
+1. **The diff has to physically reach the beacon's neighbourhood.** Propagation still walks [the HNSW mesh](/concepts/hnsw-mesh) hop by hop under [an energy budget](/concepts/energy-model). If the diff runs out of energy first, or the topic region is disconnected from where the diff originated, it never arrives — no beacon can pull it across the graph. A beacon is planted *at* the topic so that topic-knowledge reaches it by ordinary reach; it does not teleport diffs to you.
+2. **The diff has to be relevant enough to activate the beacon.** Reaching the neighbourhood is necessary but not sufficient: the beacon only fires when relevance is `>= activation_threshold` (default `0.7`) — a higher bar than the `sigma_min` (default `0.3`) an ordinary forward needs. A weakly-related diff can pass *through* the region without ever activating your beacon.
+
+What a beacon *does* buy you at its position is a **wider catchment than a plain node would have there**. Its declared interest lifts its forwarding score (the `declared_interest` term in [the σ score](/concepts/gossip-propagation)), so a beacon accepts diffs at the ragged semantic edge of the topic that an ordinary cell at the same spot would drop. That widening is real and load-bearing — but it is widening *at the topic's boundary*, not routing across the graph.
+
+<Warning>
+A beacon is **not** a global content-addressed router. It does not route a diff to your agent's position; it catches what reaches its own planted position and reports to you. If a class of memory must *always* land, pair the beacon with [propagation tuning](/recipes/tune-propagation-distance) so the diff carries enough energy to reach the topic region in the first place.
+</Warning>
+
+## Position versus beacon — and why a beacon is now the only way to declare interest
+
+An agent has two ways to end up receiving a diff, and they are cleanly separated:
+
+| | Agent position | Beacon |
+| --- | --- | --- |
+| What sets it | Centroid of recent work | The interest you name |
+| Moves over time | Yes — drifts with work | No — fixed for its life |
+| Recomputed | When drift crosses `drift_threshold` | Never |
+| Contributes to `declared_interest`? | **No** | **Yes — the only node type that does** |
+| Use it for | Catching what's relevant to what you're doing now | Permanently watching a topic, from anywhere |
+
+The last two rows are the important part. The forwarding score has a `declared_interest` term, and a **beacon is the only thing that contributes to it** — a bare agent's position no longer does. Concretely, a plain agent is reached on semantic proximity and salience alone; to *declare* a standing interest ("route this topic to me, wherever I am"), you must place a beacon. If you were relying on an agent's position to attract a topic it doesn't actively work in, that no longer happens — place a beacon.
+
+## A worked example
+
+Your agent spends the day writing frontend code, so its position drifts into UI-component space. But there is one backend fact you care about whenever it changes: how long production auth tokens live.
+
+```python
+await client.start_session("frontend-agent")
+await client.place_beacon("production auth token expiry and rotation")
+# your agent keeps working on UI; its position drifts away from auth entirely
+```
+
+Hours later, a different agent — one you have never heard of — stores a decision:
+
+```python
+await other.store(CellInput(
+    cell_type=CellType.DECISION,
+    content="Prod auth tokens now rotate every 12h.",
+    salience=0.9,
+))
+```
+
+That diff propagates through auth-configuration space, reaches your **listening post** planted there, clears its `activation_threshold`, and the delivery streams to your inbox — even though your agent node is sitting in frontend space and you never queried:
+
+```python
+async for item in client.inbox():
+    print("my beacon caught:", item.diff.payload.content)   # "Prod auth tokens now rotate every 12h."
+```
+
+## Gotchas
+
+- **A beacon hears what reaches it — nothing more.** It catches topic-knowledge by ordinary energy-bounded reach. A low-salience diff that stops early, or a topic in a disconnected part of the graph, won't arrive. Salience still governs reach; a beacon makes you a good *destination*, not an unmissable one.
+- **`activation_threshold` (0.7) is a real filter.** It is stricter than the `sigma_min` (0.3) forwarding gate, so a beacon deliberately ignores diffs that are merely adjacent to its topic. That keeps the inbox focused, but it means a borderline-relevant memory may not activate a beacon even when it passes nearby.
+- **A beacon persists once placed — there is no client call to remove it today.** The only beacon operations exposed to clients are `place_beacon` and `list_beacons`; a beacon does not drift, is not evicted, and cannot be deactivated or deleted through the client API. Place beacons deliberately, and prefer one durable beacon per standing interest.
+- **No dedup across beacons.** Placing two overlapping beacons creates two separate listening posts, each with its own deliveries — overlapping interests mean duplicate inbox traffic. Keep one beacon per genuinely distinct interest. (There is no server-side uniqueness check; each `place_beacon` is a new node.)
+
+## How this connects to the rest of the system
+
+A beacon shapes the `declared_interest` term that [gossip propagation](/concepts/gossip-propagation) uses when scoring whether to forward a diff to a node. A well-placed beacon widens its own delivery catchment at its planted position — and because it forwards to its owner, it is how a topic reaches an agent that is not itself positioned near that topic.
+
+To create a beacon in practice, see the [place-beacon MCP tool](/mcp/tools/place-beacon) and the [route-with-beacons recipe](/recipes/route-with-beacons).
+
+## Source
+
+This page is a teaching restatement of the HyphaeDB specifications and whitepaper. It does not define new behaviour.
+
+- [mesh-layer spec §6.1–6.2](https://github.com/hyphae-db/hyphae-core/blob/main/specs/mesh-layer.md) — agent positioning, drift, beacon placement, `activation_threshold`, and the no-drift / eviction-exempt invariants.
+- [interest-routing-calibration spec §7.4](https://github.com/hyphae-db/hyphae-core/blob/main/specs/interest-routing-calibration.md) — why a beacon declares interest by placement (Mechanism A) and the σ interest term only widens the boundary (Mechanism B).
+- The HyphaeDB whitepaper, Equation 2 — the agent position / drift formulation.

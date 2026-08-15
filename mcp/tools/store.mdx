@@ -1,0 +1,82 @@
+---
+title: "store"
+description: "Store a memory cell over MCP; the server embeds it, stamps the authenticated source agent, and gossips it."
+---
+
+Store a memory cell. The server computes its embedding, stamps the authenticated `source_agent`, and gossips the resulting diff to interested agents. It returns the new node id.
+
+Dispatches to the `store` internal service method.
+
+## Parameters
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `content` | string | Yes | — | The cell content to store. |
+| `cell_type` | string | Yes | — | The cell type. One of `Decision`, `Constraint`, `Risk`, `Pattern`, `Lesson`, `Fact`, `Preference`, `Context`, `Task`. Drives energy and promotion. |
+| `salience` | number | No | `0.5` | Salience hint in `[0, 1]`; higher reaches further during gossip. |
+| `scene_id` | string | No | — | UUID of a scene this cell belongs to. |
+| `source_ref` | object | No | — | Provenance back-reference: `{ "kind": string, "locator": string }` (for example `file:line` or a URL). |
+| `metadata` | object | No | `{}` | Structured metadata. |
+| `idempotency_key` | string | No | — | A replayed key returns the original node id instead of creating a duplicate. |
+
+There is no `source_agent` or `tenant_id` parameter. The server stamps identity from the authenticated principal — never from the request body. See [Trust and provenance](/concepts/trust-and-provenance).
+
+## Returns
+
+```json
+{ "node_id": "<uuid>" }
+```
+
+Returned as the `structuredContent` payload, mirrored in the text content block.
+
+## Example
+
+Request:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "store",
+    "arguments": {
+      "content": "Use pgvector for the V1 storage backend.",
+      "cell_type": "Decision",
+      "salience": 0.9,
+      "source_ref": { "kind": "file", "locator": "specs/hyphae-storage.md:42" }
+    }
+  }
+}
+```
+
+Response:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": [
+      { "type": "text", "text": "{\"node_id\":\"6f9619ff-8b86-d011-b42d-00cf4fc964ff\"}" }
+    ],
+    "structuredContent": { "node_id": "6f9619ff-8b86-d011-b42d-00cf4fc964ff" },
+    "isError": false
+  }
+}
+```
+
+## Annotations
+
+The tool's MCP behaviour hints, as emitted in `tools/list` (advisory display metadata — see [the annotations contract](/mcp/overview#tool-annotations)):
+
+| `readOnlyHint` | `destructiveHint` | `idempotentHint` | `openWorldHint` |
+|---|---|---|---|
+| `false` | `false` | `false` | `false` |
+
+A write that mints a fresh cell per call — additive (nothing is destroyed), and not idempotent: `idempotency_key` is optional, so a repeat without one stores a second cell.
+
+## Related
+
+- [recall](/mcp/tools/recall) and [query](/mcp/tools/query) to find stored cells.
+- [Gossip propagation](/concepts/gossip-propagation) and the [energy model](/concepts/energy-model) for how salience and cell type drive reach.

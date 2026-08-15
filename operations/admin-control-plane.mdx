@@ -1,0 +1,238 @@
+---
+title: Admin control plane
+description: The operator surface over /admin/api — the OIDC-authenticated control plane for identity lifecycle and data lifecycle, distinct from the /v1 data plane, and the "Mycelium" web console that drives it.
+---
+
+<Note>
+**Status: partially implemented.** Both the **identity** ops (list/get agents; **issue**, revoke,
+rotate, suspend, reinstate) and the **data-lifecycle** ops (delete node, erase, reembed, job status)
+are live over the REST `/admin/api` router today, behind an operator session. The **Mycelium** web
+console (`web/admin/`) ships the identity screens — an agents list and an agent-detail view with the
+four mutations, including reveal-once credential rotation. **Deferred:** the console's
+data-lifecycle screens (erase/reembed/jobs are reachable over REST and gRPC but have no UI yet).
+
+The **gRPC `HyphaeAdmin` service and the `hyphaectl` CLI are LIVE.** The control plane is no longer
+REST-only, and that matters most during an incident: the REST adapter authenticates ONLY via the
+OIDC browser session and mounts only when `admin.console_enabled`, so revoking a compromised
+credential over REST begins with standing up an identity provider. `hyphaectl` dials the gRPC
+service with the same API key the data plane uses.
+</Note>
+
+Every mature data system separates a **data plane** — store, recall, gossip, the hot path served on
+`/v1` — from a **control plane**: provisioning, revocation, deletion, and migration, the operator
+path. HyphaeDB built the control-plane *logic* (the `Registry` identity lifecycle and the
+`LifecycleManager` data lifecycle) long before it had a *plane* to invoke it on. This page documents
+that plane: the `/admin/api` surface, who may call it, and the safety envelope wrapped around its
+irreversible operations.
+
+The control plane is deliberately a **separate surface** from the data plane. It is an axum router
+merged in outside the `/v1` OpenAPI coverage, so it can be authorized independently, omitted from
+public ingress, and reasoned about on its own. The two planes even authenticate differently — which
+is the first thing to get right.
+
+## Authentication: an operator session, not a data key
+
+Two operator paths, and which you can use depends on the transport:
+
+- **gRPC / `hyphaectl` — an API key.** `x-hyphae-key`, the same metadata the data plane uses. The
+  facade still authorizes every operation, so a non-admin key is `PermissionDenied` exactly as over
+  REST — the transport adds no authority. This is the incident path: no identity provider required.
+- **REST `/admin/api` (what the web console consumes) — an OIDC session.** The REST adapter does
+  **not** accept an API key. An operator authenticates with an **OIDC Authorization-Code login**
+  that establishes a browser **session**:
+
+<Steps>
+  <Step title="Begin">
+    `GET /admin/auth/login` redirects (302) to your IdP's authorize URL and sets a transient,
+    `SameSite=Lax` CSRF `state` cookie that the callback double-submits.
+  </Step>
+  <Step title="Callback">
+    `GET /admin/auth/callback` exchanges the code, resolves the operator's federated subject to a
+    local `Principal`, and sets the session cookie — then redirects to `/admin`.
+  </Step>
+  <Step title="Act">
+    Every `/admin/api/*` request carries the session cookie. `POST /admin/auth/logout` drops the
+    session server-side and clears the cookie.
+  </Step>
+</Steps>
+
+The session cookie (`hyphae_admin_session`) is an **opaque server-side id**, never a token — the
+IdP token stays in the server's `OidcLogin` relying party. It is set `HttpOnly` (so XSS cannot read
+it) and `SameSite=Lax`, plus `Secure` when served over TLS. Because operator login rides the same
+`pluggable-authn` machinery as any other credential, an operator SSO produces an
+`AuthSuccess`/`AuthFailure` audit row on the same sink the data plane uses.
+
+<Warning>
+The console is off by default and gated at boot. Set `admin.console_enabled` to serve it, and supply
+`admin.bootstrap_oidc_subject` (the first operator's OIDC subject, bound idempotently to a
+`ServiceAdmin` federated identity on startup). In the **Production** deployment profile the server
+**refuses to boot** the console over a plaintext listener — the OIDC login and session cookie must
+not cross cleartext — so TLS is required there.
+</Warning>
+
+## Authorization: ServiceAdmin and ProjectAdmin
+
+Every operation resolves the session to a `Principal` and runs it through the §8 authz matrix. Two
+admin roles matter:
+
+- **`ServiceAdmin`** — service-wide authority. Crosses every tenant freely; the only role that may
+  run corpus-wide or agent-wide operations (`reembed`, `erase Agent`).
+- **`ProjectAdmin`** — confined to its **own tenant**. May list/read/mutate agents and delete/erase
+  data *within that tenant*, and is denied — with a `Forbidden` and an `AuthzDenied` audit, no
+  dispatch — on any cross-tenant target.
+
+A non-admin principal (e.g. a `Writer`) is denied at a coarse role gate before any dispatch. See
+[Authorization](/operations/authorization) for the full role model.
+
+<Note>
+**Honest scoping caveat.** Today `ProjectAdmin` authority is **tenant-granular, not
+project-granular** — a `ProjectAdmin` may act on any agent or node in its own tenant, not only its
+project. Project-granular authz rides a planned `RbacAuthorizer` unification. Read the matrix's "of
+the target's project" wording as **tenant-scoped** until then.
+</Note>
+
+Reads are anti-oracle: a `ProjectAdmin` reading a cross-tenant agent gets `NotFound`, identical to a
+truly-missing id, so the read cannot confirm an agent's existence in another tenant.
+
+## The identity surface
+
+Managing agent credentials — the operator's answer to "a key leaked, cut it off now." Every route is
+session-gated; every mutation is charged `RateOp::Admin` and emits a synchronous audit.
+
+| Method + path | What it does | Success |
+|---|---|---|
+| `GET /admin/api/me` | The signed-in operator (a lightweight session reflection — no audit, no rate charge) | `200` |
+| `GET /admin/api/agents` | Keyset-paginated agent list (`cursor`, `limit`), scoped to the caller's authority | `200` + `{ agents, next_cursor }` |
+| `GET /admin/api/agents/{id}` | One agent record (status, roles, tenant — never the secret) | `200` |
+| `POST /admin/api/agents` | Issue a new agent identity (`display_name` ≤ 64 chars, `tenant_id`, `credential_kind: api_key_hash`, `roles`); returns the new secret **once** | `200` + `{ agent_id, plaintext_secret }` |
+| `POST /admin/api/agents/{id}/revoke` | Permanently revoke a credential | `204` |
+| `POST /admin/api/agents/{id}/suspend` | Reversibly disable authentication | `204` |
+| `POST /admin/api/agents/{id}/reinstate` | Re-enable a suspended agent | `204` |
+| `POST /admin/api/agents/{id}/rotate` | Rotate the credential; returns the new secret **once** | `200` + `{ agent_id, plaintext_secret }` |
+| `GET /admin/api/agents/{id}/descriptor` | Read the agent's stored descriptor | `200` (`404` when none) |
+| `PUT /admin/api/agents/{id}/descriptor` | Set or replace the descriptor | `200` + descriptor |
+| `POST /admin/api/agents/{id}/descriptor/import` | Import an external agent card (body `{format, document, verification_jwks?, provider?}`) | `200` + descriptor |
+
+A revoke or rotate is **immediate**: the dispatch invalidates the principal cache synchronously, so
+the old credential fails authentication on the very next request — there is no TTL window. The
+rotated `plaintext_secret` is surfaced to the caller exactly once and is never logged or written to
+an audit event; the Mycelium console reveals it in a copy-once dialog.
+
+### Agent descriptors
+
+The three descriptor routes attach a **descriptor** — a card-shaped description of what an agent is
+and can do — to an agent identity. Descriptors are **inert**: setting or importing one changes
+nothing about authentication, authorization, or trust; it is recorded metadata, never a permission
+input.
+
+The import route accepts two formats: an **A2A AgentCard** — both the current v1.0.1
+`supportedInterfaces` shape and the pre-1.0 shape (`url` / `preferredTransport`), with which shape
+was ingested recorded in the import origin (`card_shape`) — or an **ACP agentInfo** document. A
+signed card is verified against the supplied JWKS and the result recorded, fail-closed: a
+signature that should verify but does not rejects the import. Imports are idempotent, and every
+set/import writes a synchronous `DescriptorSet`/`DescriptorImport` [audit row](/operations/audit-log).
+
+## The data-lifecycle surface
+
+Destroying or migrating stored memory — high blast radius, so each route carries an extra guard.
+These dispatch to the `LifecycleManager`; the facade owns the authz, tenant confinement, rate
+charge, and audit. See [Data lifecycle](/operations/data-lifecycle) for the underlying tombstone and
+erasure mechanics.
+
+| Method + path | What it does | Success |
+|---|---|---|
+| `POST /admin/api/nodes/{id}/delete` | Tombstone-first, idempotent single-node delete | `204` |
+| `POST /admin/api/erase` | Compliant bulk erasure by scope; returns an erasure certificate | `200` + certificate |
+| `POST /admin/api/reembed` | Start a corpus reembed job (new engine chosen server-side from config) | `200` + `{ job_id }` |
+| `GET /admin/api/jobs/{id}` | Poll a job's state (`running`/`succeeded`/`failed` + progress) | `200` / `404` |
+
+**Delete** takes an optional body `{ "reason": "user_delete" | "retention" | "superseded" }` (absent
+⇒ `user_delete`); a second delete of an already-tombstoned node is a success no-op.
+
+**Erase** requires a two-field confirmation. The body is
+`{ "scope": { "kind": "node"|"project"|"agent", "id": "<string>" }, "confirm": "<label>", "dry_run": false }`,
+and `confirm` **must equal the scope's canonical label** — `agent:<id>`, `project:<id>`, or
+`node:<uuid>`. A mismatch is a `400` that destroys nothing and still writes a `Denied` audit of the
+refused attempt. `dry_run: true` returns the would-remove counts without deleting. On a real erase,
+the response is an **erasure certificate**: the per-tier removal counts (`nodes_removed`,
+`diffs_removed`, `deliveries_removed`, `sessions_removed`, `aggregates_recomputed`,
+`tombstones_propagated`) plus a `digest` — a non-repudiable receipt that the compliance deletion
+happened.
+
+<Warning>
+Erasure is irreversible, and `erase Agent` is `ServiceAdmin`-only. The `confirm` label is your
+seatbelt — it must be typed to match the exact scope, so an erase cannot fire on a fat-fingered id.
+</Warning>
+
+**Reembed** is a long-running maintenance job, not a blocking call: the request returns a `job_id`
+immediately and at most **one reembed runs service-wide at a time** — a second request while one is
+`running` returns `409 Conflict`. The new embedding engine is selected server-side from
+`cfg.embedding` (the operator changes the configured model, then triggers a reembed to migrate the
+corpus), so the request carries no body. Poll `GET /admin/api/jobs/{id}` for
+`{ status: "running", nodes_processed, nodes_total }` → `succeeded` or `failed`. Jobs are in-memory
+in V1: a crash loses the job record but not corpus consistency (the reembed commits its watermark
+last), and the operator simply re-triggers.
+
+## The audit and rate-limit envelope
+
+Because control-plane operations are high-privilege and rare, every one runs the same envelope:
+**authenticate → authorize → rate-limit (`RateOp::Admin`) → validate → dispatch → synchronous
+audit**. Two properties follow:
+
+- **Fail-closed audit.** A mutating operation reports success only once its audit row is durable. If
+  the audit write fails, the operation fails — there is no unaudited erase or revoke.
+- **Consistent error contract.** `/admin/api` reuses the data plane's `Error`→status mapping:
+  `Validation`→400, `Unauthorized`→401, `Forbidden`→403, `NotFound`→404, `Conflict`→409,
+  `RateLimited`→429 (+ `Retry-After`). The session gate runs *first*, so an unauthenticated request
+  is a `401` even with a malformed body, and a non-admin session is a `403`, never a `401`.
+
+## The Mycelium web console
+
+`web/admin/` is the React + React Aria SPA — "Mycelium" — served over this REST surface. It boots by
+calling `GET /admin/api/me`; a `401` routes to an OIDC login screen. Today it ships the **identity**
+workflow end-to-end: an agents list (keyset paging, filters, loading/empty/error states) and an
+agent-detail view whose actions are the four mutations above, each behind a confirm dialog, with
+rotation revealing the new secret exactly once. The data-lifecycle routes are live on the server but
+do not yet have console screens — drive them with `curl` or an ops script in the meantime.
+
+## `hyphaectl` — the incident path
+
+The CLI over the gRPC `HyphaeAdmin` service. Authenticates with an operator API key, so it needs no
+identity provider and no browser.
+
+```bash
+export HYPHAE_ADMIN_KEY='hyk_...'          # prefer the env var: an argv key is visible in `ps`
+export HYPHAE_ADMIN_ADDR='https://hyphae:50051'   # defaults to http://127.0.0.1:50051
+
+hyphaectl agents list
+hyphaectl agents get <agent-id>
+hyphaectl agents revoke <agent-id>          # the compromised-credential path
+hyphaectl agents rotate <agent-id>          # prints the new one-time secret to stdout
+hyphaectl agents suspend|reinstate <agent-id>
+
+hyphaectl audit verify                      # recompute the chain; non-zero exit if broken
+
+hyphaectl node delete <node-id> --reason user_delete
+hyphaectl erase agent <agent-id> --confirm "agent:<agent-id>" --dry-run
+hyphaectl reembed start
+hyphaectl reembed job <job-id>
+```
+
+**`erase` will not fill in `--confirm` for you.** The confirmation must equal the scope's canonical
+label (`agent:<id>` / `project:<id>` / `node:<id>`) and the server checks it. A tool that derived the
+label would turn a two-field confirmation into a formality it satisfies on the operator's behalf,
+which is the opposite of why the second field exists. Run with `--dry-run` first: it reports what
+would be removed and deletes nothing (a dry run is a preview, so it carries no certificate digest —
+only a real erasure is issued one).
+
+Authorization is unchanged by the transport: every command dispatches to the same facade as REST, so
+a non-admin key is refused identically and every mutation emits the same synchronous audit row.
+
+## Source
+
+This page is a teaching restatement of the
+[admin-control-plane spec](https://github.com/hyphae-db/hyphae-core/blob/main/specs/admin-control-plane.md);
+that spec (its §7.1 REST transport and §8 authz matrix) is authoritative for any detail here. The
+spec's §6 trait `issue` operation is now live on the facade + `POST /admin/api/agents`, and the gRPC
+`HyphaeAdmin` service + `hyphaectl` CLI are live alongside it (identity, data-lifecycle, and audit
+chain verification). Follow the code.

@@ -1,0 +1,156 @@
+---
+title: Deployment and operations
+description: How a hyphae-server process is packaged, sized, started, drained, and operated — the single-container topology, resource model, graceful shutdown, and config reload stance.
+---
+
+This page explains how HyphaeDB is operated: how the process is packaged and sized, how it shuts
+down cleanly, and which settings can change at runtime. The principle that organizes all of it is
+simple — **a planned shutdown is a graceful drain, not a crash; an unplanned crash is the high
+availability and disaster recovery path** (see [/operations/high-availability](/operations/high-availability)
+and [/operations/durability-and-dr](/operations/durability-and-dr)).
+
+## Topology
+
+A deployment is one `hyphae-server` container talking to an **external** PostgreSQL with `pgvector`,
+plus an **optional** TEI embedding sidecar. The server holds the in-memory HNSW mesh; PostgreSQL is
+the system of record. A high-availability standby is simply a second copy of the same container.
+
+## Embedding packaging modes
+
+The embedding model is 400 MB–2 GB and changes far less often than the binary, so it does not belong
+in the app image. Three delivery modes are selected by configuration, with no application change:
+
+| Mode | How | When to use |
+|------|-----|-------------|
+| Init-container warm (recommended) | An init container pre-populates a shared `model-cache` volume at the embedding cache path; the app starts with a warm cache and never downloads on the request path. The in-process `candle` engine itself is compiled into the default image. | The default Kubernetes mode. |
+| Baked Candle | Weights additionally copied into a custom image (`candle` provider needs no rebuild — only the weights do). | Air-gapped or immutable single-artifact deploys. |
+| TEI sidecar | `HYPHAEDB_EMBEDDING_PROVIDER=tei` points at a co-located TEI container. | Production throughput, or a model TEI serves better than in-process Candle. |
+
+## Resource model
+
+Resident memory is dominated by three terms: the HNSW footprint, the embedding model's resident set,
+and base runtime — plus headroom:
+
+```text
+mem ≈ HNSW_footprint + embedding_RSS + base_runtime + headroom
+```
+
+Each L0 node costs roughly 7 KiB (a 1024-dim `f32` embedding plus its L0 adjacency). The embedding
+model adds ~0.4–2 GiB resident (or ~0 in the server when using the TEI sidecar). Base runtime is
+~256 MiB, with ~50% headroom over the steady-state estimate.
+
+| L0 node count | Memory request (≈) | Suggested limit |
+|--------------:|-------------------:|----------------:|
+| 10,000 | 2.0 GiB | 2.5 GiB |
+| 100,000 | 3.0 GiB | 4 GiB |
+| 500,000 | 7.5 GiB | 9 GiB |
+| 1,000,000 (node ceiling) | 13 GiB | 16 GiB |
+
+The node ceiling of 1,000,000 is a memory ceiling **by design**: cold nodes evict from RAM above it
+while their PostgreSQL row stays, so resident memory is bounded independent of corpus size (see
+[/operations/data-lifecycle](/operations/data-lifecycle)). For CPU, request 2 and limit 4 cores as a
+V1 default, sized for 16 concurrent gossip propagations plus the RPC layer and embedding.
+
+## Health probes
+
+Liveness and readiness have different jobs, and wiring them correctly is load-bearing:
+
+- **Liveness** (`/healthz`) returns `200 {"status":"ok"}` and gates on nothing external — it stays
+  `200` throughout rehydration, so Kubernetes never kills a pod that is correctly rebuilding its mesh.
+- **Readiness** (`/readyz`, plus `grpc.health.v1`) aggregates a probe set — `storage` (a live
+  `SELECT 1` against the pool), `embedding` (the configured provider, probed the same way boot
+  coerces it), `audit` (Down only if the audit writer has died), and `graph` (the rehydration state)
+  — and returns ready only when all are `Up`, so the load balancer never routes to an instance that
+  cannot actually serve. The response body names each probe and its state, which is the first thing
+  to read when a pod won't go ready.
+- **gRPC health** mirrors the same verdict on the standard `grpc.health.v1` service and is
+  **fail-closed**: the overall service reports `NOT_SERVING` from the first instant of boot until
+  readiness is genuinely up, and flips back to `NOT_SERVING` the moment a drain starts.
+
+Probe evaluation is cached for one second with single-flight de-duplication, so an aggressive prober
+(or many of them) cannot amplify into a `SELECT 1` storm. A `startupProbe` on `/healthz` with a
+generous failure threshold fully decouples liveness from a slow cold rehydration.
+
+Prometheus metrics are served from `GET /metrics` on the REST port when
+`HYPHAEDB_TELEMETRY_MODE=prometheus` (the compose default) — see
+[/operations/configuration](/operations/configuration).
+
+## Graceful shutdown
+
+On `SIGTERM` or `SIGINT` (a deploy, rollout, or node drain) the server runs an ordered six-step
+drain. The order matters — readiness flips first so the load balancer stops sending work before
+anything else winds down.
+
+<Steps>
+  <Step title="Flip readiness to 503">
+    `/readyz` returns 503 and gRPC health flips to `NOT_SERVING`; the load balancer removes the
+    instance from rotation while in-flight requests keep completing.
+  </Step>
+  <Step title="Drain the in-flight gossip queue">
+    Reject new propagations but let in-flight walks finish, bounded by the drain timeout (10s
+    default).
+  </Step>
+  <Step title="Signal connected agents (deferred)">
+    The `StreamClosing` control frame is not yet implemented — today the inbox stream simply ends
+    and the SDKs' reconnect loop re-establishes it against the next instance.
+  </Step>
+  <Step title="Checkpoint a snapshot">
+    When a snapshot directory is configured (`HYPHAEDB_SNAPSHOT_DIR`), write a mesh snapshot so the
+    next boot replays only a small delta instead of a full scan. Best-effort: a snapshot failure is
+    logged, never blocks the exit.
+  </Step>
+  <Step title="Release the HA lease (deferred)">
+    A logged no-op until high availability lands — there is no lease to release in a
+    single-instance deployment.
+  </Step>
+  <Step title="Close the pool and exit">
+    Stop the servers gracefully (in-flight requests finish), close the PostgreSQL pool last, exit
+    cleanly.
+  </Step>
+</Steps>
+
+A planned shutdown loses no acknowledged write: deliveries are recorded synchronously and
+idempotently, so a drain timeout can only drop the not-yet-delivered tail of a walk, which the sweep
+re-drives on restart. A second `SIGTERM`/`SIGINT` during the drain escalates to an immediate exit so
+an operator can force a stuck drain.
+
+<Note>
+`terminationGracePeriodSeconds` (default 30s) is sized above the worst-case drain, snapshot, and
+lease release. The drain timeout (10s) must be strictly less than the grace period — the server
+refuses to start otherwise.
+</Note>
+
+## Config reload stance
+
+Structural config — HNSW dimensions, embedding model and provider, and the storage backend — is
+**immutable for the process lifetime**. Changing it requires the re-embed migration plus a restart.
+`SIGHUP` reloads only non-structural tunables — today that is the gossip tunables (`sigma_min`,
+`k_neighbors`) and the retention TTLs; log filter, trace sampling, and sweep cadence are in the
+spec's reloadable set but currently rejected with an explicit restart-to-apply message rather than
+silently accepted. The reload is all-or-nothing: a `SIGHUP` whose diff touches a structural field
+changes nothing and logs a config error naming the offending path (never its value). See
+[/operations/configuration](/operations/configuration).
+
+## Operational artifacts
+
+The repository ships these under `deploy/`, each validated in CI (kubeconform, helm lint +
+template invariants, `terraform validate`, promtool):
+
+- `Dockerfile` (distroless, no model weights, non-root) and `docker-compose.yml` — the self-host
+  quickstart, with a `snapshot-cache` volume pre-wired.
+- `k8s/` raw manifests — `Deployment` with the TEI embedding sidecar as a native sidecar
+  (`restartPolicy: Always` init container), the exact probe timings from the spec, a
+  `PodDisruptionBudget` (gated on `replicaCount > 1`), and `Service`s.
+- `helm/hyphaedb/` — a Helm chart kept contract-identical to the raw manifests by a CI parity check.
+- `terraform/aws/` and `terraform/gcp/` — managed-Postgres reference stacks (RDS / Cloud SQL with
+  pgvector, automated backups on by default).
+- `marketplace/` — the AWS/GCP marketplace listing groundwork.
+- `alerts/hyphaedb.rules.yml` — six Prometheus alert rules over the standard metrics.
+- `runbooks/` — operator runbooks: crash-and-rehydrate, PostgreSQL unreachable, OOM at the node
+  ceiling, slow rehydration, and [disaster-recovery restore](/operations/durability-and-dr).
+
+## Source
+
+This page is a teaching restatement of the
+[deployment-operations spec](https://github.com/hyphae-db/hyphae-core/blob/main/specs/deployment-operations.md);
+that spec is authoritative for any detail here.

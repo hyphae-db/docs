@@ -1,0 +1,69 @@
+---
+title: "Recipe: tune how far a memory travels"
+description: Use salience and cell type to control a memory's propagation reach — from a local note to a decision that reaches the whole mesh.
+---
+
+**Goal.** Decide, at write time, whether a memory stays local or travels far — without touching the
+mesh or any routing table.
+
+**Prerequisites.** A server running and an agent key (see the [quickstart](/quickstart)).
+
+## The two knobs you control
+
+A diff's reach is set by the **energy** it's seeded with, and you influence that per write with two
+inputs (the rest of the energy model is server-side — see [the energy model](/concepts/energy-model)):
+
+| Input | Effect |
+|-------|--------|
+| **`salience`** (`0.0`–`1.0`) | Scales the seed energy. Higher salience → more energy → more hops before the diff runs out and stops. |
+| **`cell_type`** | Each type carries a calibrated multiplier. A `DECISION` or `CONSTRAINT` is seeded with more energy than a routine `TASK` or `CONTEXT`, so it travels farther at the same salience. |
+
+Seed energy rises with both, so a **salient decision** reaches much of the mesh while a **routine task**
+stays near where it was written.
+
+## Steps
+
+<Steps>
+  <Step title="Make something travel far">
+    A high-salience decision — the kind other agents should hear about:
+
+    ```python
+    await client.store(CellInput(
+        cell_type=CellType.DECISION,
+        content="We are standardizing on gRPC for all internal services.",
+        salience=0.95,
+    ))
+    ```
+  </Step>
+
+  <Step title="Keep something local">
+    A low-salience routine note — no reason to flood the mesh:
+
+    ```python
+    await client.store(CellInput(
+        cell_type=CellType.TASK,
+        content="Rebased the feature branch onto main.",
+        salience=0.1,
+    ))
+    ```
+  </Step>
+
+  <Step title="Confirm it with your eyes">
+    Watch either diff's actual hop-by-hop reach in the
+    [Topology Observatory](/recipes/watch-propagation) — you'll see the decision spend energy across many
+    hops while the task stops after one or two.
+  </Step>
+</Steps>
+
+<Note>
+`salience` is validated to `[0.0, 1.0]` client-side. The absolute reach also depends on operator-set
+energy configuration (the base energy budget and the calibrated type multipliers) — those are server
+tuning, documented in [the energy model](/concepts/energy-model). As an author, salience and cell type
+are the levers you hold.
+</Note>
+
+## See also
+
+- [The energy model](/concepts/energy-model) — the seed-energy formula and the type multipliers.
+- [Watch a memory propagate](/recipes/watch-propagation) — see reach directly.
+- [Route knowledge with beacons](/recipes/route-with-beacons) — the destination side of the same story.

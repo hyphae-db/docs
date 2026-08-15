@@ -1,0 +1,75 @@
+---
+title: Contradiction detection
+description: How HyphaeDB decides two memories genuinely disagree — geometry proposes, an explicit classifier disposes — and how a confirmed contradiction gates promotion, decays trust, and propagates.
+---
+
+Three load-bearing mechanisms in HyphaeDB depend on knowing when stored knowledge is *disputed*:
+promotion refuses to elevate contested memories, an agent whose claims get contradicted loses
+trust, and the dispute itself propagates widely so other agents see it. The contradiction detector
+is the single producer all three consume.
+
+## Why cosine similarity cannot detect disagreement
+
+The tempting shortcut — "high similarity plus opposing content is a contradiction" — is not just
+imprecise, it is ill-defined. Embeddings measure topical *nearness*: "the database must use
+Postgres" and "the database must NOT use Postgres" sit nearly on top of each other in embedding
+space, because they are about the same thing. Geometry cannot distinguish assertion from negation;
+a similarity threshold alone would flag every paraphrase and elaboration as a "contradiction" while
+missing real disagreements phrased differently.
+
+HyphaeDB's resolution is a **two-stage seam**:
+
+<Steps>
+  <Step title="Stage 1 — geometry proposes (and only proposes)">
+    A cosine band (`[0.55, 0.97]` by default) narrows the candidate set to *same-topic* prior
+    cells. The lower bound excludes unrelated memories; the upper bound excludes near-duplicates —
+    a restatement is not a disagreement. Stage 1 **never** asserts a contradiction.
+  </Step>
+  <Step title="Stage 2 — an explicit classifier disposes">
+    A pluggable stance classifier answers, for each candidate pair: does the new claim *entail*,
+    stay *neutral toward*, or *contradict* the prior claim? Only a `Contradicts` verdict at or
+    above a confidence threshold (`0.7` default) counts. Replace the classifier with one that
+    always answers Neutral and the system produces **zero** contradictions — that falsifiability
+    is the design's keystone invariant.
+  </Step>
+</Steps>
+
+## What a confirmed contradiction does
+
+For each confirmed disagreement, atomically and idempotently (one edge per directed pair, ever):
+
+- A **`Contradicts` edge** is persisted — the durable, attributed record of the dispute (who
+  claimed, who was contradicted, at what confidence, judged by which detector).
+- The contradicted memory's **promotion counter** increments — the layer-promotion gate refuses
+  to elevate disputed knowledge, and already-promoted knowledge demotes past a threshold.
+- A **`Contradiction` diff** propagates through gossip with a 1.5× energy bonus, so conflicts
+  surface widely rather than staying local.
+- The contradicted **author's trust decays** (persisted write-through), feeding the
+  adversarial-resilience model described in [trust and provenance](/concepts/trust-and-provenance).
+
+## The keystone lesson (why this page exists)
+
+The detector and the promotion gate were each built, tested, and green — and the mechanism was
+still broken end-to-end for a while: the detector recorded its increments under one key (the
+cell's identity) while the store path stamped diffs with a random id the gate then read. Two
+components, each correct against its own contract, disagreeing about a shared key no test spanned.
+The repair was one line plus the integration test the spec had always called for; the lesson is
+durable: **a contract two components assume but neither tests fails invisibly**. The
+promotion-gate wiring test now stores a claim, confirms a contradiction against it, and asserts
+the gate refuses — the whole seam, one test.
+
+## Operating it
+
+Detection is **off by default** (`contradiction.enabled: false`). The default NLI classifier is a
+local model behind a build feature (heavy ML dependencies; a cache miss downloads weights), and
+the LLM-judge variant needs a wired client — so a server asked to detect without a constructible
+classifier **refuses to boot** with a config error rather than silently detecting nothing. Checks
+run off the store's write path, bounded by `contradiction.max_concurrent_checks` (excess checks
+during a burst are skipped and logged — a lost detection is re-derivable; an acknowledged store is
+never blocked or failed). The trust penalty per contradiction is an operator tunable:
+`trust.contradiction_penalty` (default `0.05`), with its counterpart `trust.confirmation_reward`
+(default `0.02`) for confirmations.
+
+See [configuration](/operations/configuration) for the full `contradiction` section, and the
+`hyphae.contradiction.*` metrics (candidates considered, detections by stance and detector, check
+latency) on the standard scrape.

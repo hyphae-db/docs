@@ -1,0 +1,150 @@
+---
+title: Deployment
+description: Deploy HyphaeDB as a single-container service with an external PostgreSQL — run modes, persistent volumes, Kubernetes probes, and the production posture.
+---
+
+HyphaeDB is a standalone Rust service. You run one `hyphae-server` process that owns the in-memory
+HNSW mesh, talking to an external PostgreSQL instance that is the system of record. This page covers
+how to run that process — its two run modes, the volumes it needs, the Kubernetes wiring, and the
+production hardening posture.
+
+For a local stack, start with [/operations/docker-compose](/operations/docker-compose). For the
+reasoning behind this shape, see [/operations/deployment-operations](/operations/deployment-operations).
+
+## Run modes
+
+The same binary runs in two modes:
+
+| Mode | How to select | Listeners | Identity |
+|------|---------------|-----------|----------|
+| Daemon (default) | (default) | gRPC on `HYPHAEDB_GRPC_BIND` (default `0.0.0.0:50051`) and REST/WebSocket on `HYPHAEDB_REST_BIND` (default `0.0.0.0:8080`) | Per-request, from the authenticated principal. |
+| MCP stdio | `--stdio` or `HYPHAEDB_MCP_STDIO=1` | Binds no ports; speaks over stdin/stdout | Fixed for the process, from `HYPHAE_API_KEY` via the secrets seam. |
+
+Daemon mode is the deployable service. MCP stdio mode is for launching the server as a tool process
+(for example, from Claude Code) and binds no network ports.
+
+## Boot sequence
+
+On start, the daemon connects to PostgreSQL, runs migrations and verifies the dimension/model
+contract, builds the embedder, ensures a bootstrap admin exists, rehydrates the mesh from storage,
+and begins serving with graceful signal handling:
+
+```text
+HyphaeConfig::from_env_and_file
+  → telemetry init + SIGHUP register  # reload signal is live before the slow boot steps
+  → PostgresStorage::connect          # migrations + dim/model/metric contract guard
+  → build_embedder                    # configured provider, probed the same way /readyz probes it
+  → build_server                      # facade + gossip + security units + audit
+  → readiness registry                # storage/embedding/audit/graph probes behind /readyz
+  → ensure_bootstrap_admin            # fail-closed on an empty registry without the env
+  → rehydrate (snapshot + delta,      # /readyz stays 503 until the graph probe flips Up
+      or full scan)
+  → recover_pending_deletes           # re-drives deletes interrupted by the last shutdown
+  → serve (by mode)                   # graceful SIGTERM/SIGINT drain; periodic snapshots
+```
+
+## Persistent volumes
+
+A production deployment needs three durable volumes:
+
+| Volume | Holds | Why |
+|--------|-------|-----|
+| PostgreSQL data | The system of record (nodes, edges, deliveries, scenes, sessions) | The durable tier everything above storage reconstructs from. |
+| `model-cache` | Embedding model weights (~400 MB–2 GB) | So weights are not re-downloaded each restart, and not baked into the app image. |
+| `snapshot` | Periodic mesh snapshot files | The fast-start cache that bounds rehydration time — enabled by setting `HYPHAEDB_SNAPSHOT_DIR` at the mount path (the shipped compose and k8s manifests pre-wire this). Keep it on a dedicated volume, separate from the data volume; it is a cache, never a backup. See [/operations/durability-and-dr](/operations/durability-and-dr). |
+
+## Embedding packaging
+
+The embedding model is large and changes less often than the binary, so it does not belong in the
+app image. Choose one of three delivery modes through configuration:
+
+<Steps>
+  <Step title="Init-container warm (recommended)">
+    A small init container pre-downloads the weights into the shared `model-cache` volume mounted at
+    the embedding cache path. The app image stays small and the server starts with a warm cache.
+  </Step>
+  <Step title="Baked Candle">
+    Weights are copied into a custom image and the provider is `candle` (the engine itself is
+    compiled into the default image — only the weights need baking). Use this for air-gapped or
+    immutable single-artifact deploys where the larger pull is acceptable.
+  </Step>
+  <Step title="TEI sidecar">
+    Set `HYPHAEDB_EMBEDDING_PROVIDER=tei` and run a co-located TEI container. The weights live in the
+    sidecar, keeping both the app image and the volume free of model files.
+  </Step>
+</Steps>
+
+## Kubernetes probes
+
+Wire liveness and readiness so Kubernetes cooperates with mesh rehydration rather than fighting it:
+
+- `livenessProbe` → `GET /healthz`. Gates on nothing external and stays `200` throughout
+  rehydration, so Kubernetes never kills a pod that is correctly rebuilding its mesh.
+- `readinessProbe` → `GET /readyz`. Returns ready only once every probe (storage, embedding, audit,
+  graph) is `Up`, so the load balancer never routes to an instance still loading its mesh. The gRPC
+  alternative (`readinessProbe.grpc` on port 50051) probes the same evaluator via the standard
+  `grpc.health.v1` service, which starts fail-closed `NOT_SERVING`; prefer the HTTP form — its
+  response body names the failing probe.
+
+```yaml
+livenessProbe:
+  httpGet: { path: /healthz, port: 8080 }
+  initialDelaySeconds: 5
+  periodSeconds: 10
+readinessProbe:
+  httpGet: { path: /readyz, port: 8080 }
+  initialDelaySeconds: 5
+  periodSeconds: 5
+startupProbe:
+  httpGet: { path: /healthz, port: 8080 }
+  periodSeconds: 5
+  failureThreshold: 30
+```
+
+These are the exact timings the shipped `deploy/k8s/` and Helm manifests use.
+
+<Warning>
+Do not point `livenessProbe` at `/readyz`. Because readiness gates on rehydration, that would make
+Kubernetes kill a pod that is correctly warming its mesh — a restart loop that never finishes.
+</Warning>
+
+For high availability, run **two replicas with `HYPHAEDB_HA_ENABLED=1`** (the Helm chart wires the
+env automatically at `replicaCount > 1`, where the `PodDisruptionBudget` also activates): the
+lease-race loser runs as a zero-write standby (`/readyz` 503, so no traffic routes to it) and
+promotes automatically when the primary dies or drains. Never run two instances **without** the
+flag — they would both act as primary against the same PostgreSQL. See
+[/operations/high-availability](/operations/high-availability).
+
+## Production posture
+
+The service introduces a deployment profile that gates security:
+
+- **Dev** permits plaintext binds on loopback for friction-free local work.
+- **Production** mandates TLS/mTLS on every listener (a listener refuses to start without a TLS
+  identity), secrets resolved through a manager rather than raw env, and encryption at rest on
+  sensitive columns.
+
+Authorization is always enforced — every read is scoped to the authenticated principal. See
+[/operations/authorization](/operations/authorization).
+
+## Operational artifacts
+
+The repository ships these under `deploy/`:
+
+| Artifact | Purpose |
+|----------|---------|
+| `deploy/Dockerfile` | Minimal non-root runtime image with the binary and no model weights. |
+| `deploy/docker-compose.yml` | Server + PostgreSQL (`pgvector`) + optional TEI sidecar + snapshot volume. |
+| `deploy/k8s/` | `Deployment` (TEI as a native sidecar), `PodDisruptionBudget`, and `Service` manifests, kubeconform-validated in CI. |
+| `deploy/helm/hyphaedb/` | Helm chart, kept contract-identical to the raw manifests by a CI parity check. |
+| `deploy/terraform/{aws,gcp}/` | Managed-Postgres reference stacks (RDS / Cloud SQL with pgvector, automated backups on). |
+| `deploy/marketplace/` | AWS/GCP marketplace listing groundwork. |
+| `deploy/alerts/` | Prometheus alert rules over the standard metrics (promtool-linted in CI). |
+| `deploy/runbooks/` | Operator runbooks: crash-rehydrate, postgres-unreachable, OOM at the node ceiling, slow rehydration, DR restore. |
+
+## Source
+
+This guide follows the
+[deployment-operations spec](https://github.com/hyphae-db/hyphae-core/blob/main/specs/deployment-operations.md)
+and the staged rollout in the
+[build-sequence spec](https://github.com/hyphae-db/hyphae-core/blob/main/specs/11-build-sequence.md).

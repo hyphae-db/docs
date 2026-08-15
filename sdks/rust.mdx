@@ -1,0 +1,228 @@
+---
+title: Rust SDK
+description: Async gRPC client for HyphaeDB — connect, store and recall memory, and consume the live gossip inbox from Rust.
+---
+
+The Rust SDK (`hyphae-client`) is the thin smart client your service uses to talk to a HyphaeDB
+server. It is fully async (tokio + tonic) and gRPC-only: it wraps the wire contract and keeps a warm
+local read cache (your inbox of gossip deliveries plus scene summaries) so `recall` serves from
+cache first and only round-trips the server on a miss. It contains no mesh logic — gossip, the
+energy model, and layer promotion all live server-side. Because it is a plain async library with no
+process of its own, it is embeddable directly in another Rust service. See
+[the client SDK concepts](/concepts/gossip-propagation) for what the inbox delivers.
+
+<Note>
+The crate is named `hyphae-client`, not `hyphaedb`. It uses edition 2021 and depends only on the
+generated protobuf plus async plumbing — never on the server crates.
+</Note>
+
+## Install
+
+```bash
+cargo add hyphae-client
+```
+
+You also need an async runtime and the `Stream` extension trait for consuming the inbox. Add them to
+your `Cargo.toml`:
+
+```toml
+[dependencies]
+hyphae-client = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio-stream = "0.1"
+```
+
+Import the high-level surface from the crate root; the generated protobuf types (including
+`InboxItem`) live under `hyphae_client::pb`:
+
+```rust
+use hyphae_client::{HyphaeClient, ClientConfig, ClientError, CellInput, CellType, RecallQuery};
+```
+
+## Connect and authenticate
+
+Every call authenticates with your full API key — the whole `hyk_...` string. You pass it as the
+second argument to `connect`, and the SDK attaches it verbatim as the `x-hyphae-key` gRPC metadata
+header on every RPC. The SDK never parses or logs the key. `connect` accepts a bare `host:port`
+endpoint and prefixes `http://` for you.
+
+<Note>
+Identity is bound once, at connect, from the authenticated key. The SDK never self-asserts
+`source_agent`: there is no field by which a caller can claim to be another agent (the server stamps
+authorship from the key principal). This is a security invariant (INV-4 in the SDK spec) enforced
+structurally — `CellInput` simply has no `source_agent` field.
+</Note>
+
+See [the quickstart](/quickstart) for how to obtain a `hyk_...` credential.
+
+```rust
+let client = HyphaeClient::connect(
+    "localhost:50051",
+    "hyk_your_key_here",
+    ClientConfig::default(),
+)
+.await?;
+client.start_session("my-agent").await?;
+```
+
+## Quickstart
+
+A single end-to-end flow: connect, start a session, store a cell, recall it, consume one inbox
+delivery, then close.
+
+```rust
+use hyphae_client::{HyphaeClient, ClientConfig, ClientError, CellInput, CellType, RecallQuery};
+use tokio_stream::StreamExt;
+
+#[tokio::main]
+async fn main() -> Result<(), ClientError> {
+    // auth is the whole hyk_... key; it rides every RPC as x-hyphae-key and is never parsed.
+    let client =
+        HyphaeClient::connect("localhost:50051", "hyk_your_key_here", ClientConfig::default())
+            .await?;
+    client.start_session("my-agent").await?; // opens the live inbox stream
+
+    let node_id = client
+        .store(CellInput::new(CellType::Decision, "We ship on Friday"))
+        .await?;
+    println!("stored {node_id}");
+
+    let hits = client.recall(RecallQuery::new("ship")).await?; // cache-first, server on miss
+    for hit in &hits {
+        println!("{} {} {}", hit.score, hit.from_cache, hit.content);
+    }
+
+    // The inbox is a single-consumer Stream; pin it, then drain it.
+    let mut inbox = Box::pin(client.inbox());
+    if let Some(item) = inbox.next().await {
+        let delivery = item?; // an Err is the terminal fatal error, surfaced exactly once
+        println!("delivered {:?}", delivery.delivery.map(|d| d.diff_id));
+    }
+
+    client.close().await; // or just drop the client — Drop aborts the receive task
+    Ok(())
+}
+```
+
+`CellInput::new` and `RecallQuery::new` are convenience constructors; you can also build the structs
+with field literals when you need to set `scene_id`, `salience`, `k`, or filters.
+
+## API reference
+
+### connect
+
+```rust
+HyphaeClient::connect(
+    endpoint: &str,
+    auth: &str,
+    config: ClientConfig,
+) -> Result<HyphaeClient, ClientError>
+```
+
+Opens the channel, runs the unauthenticated `Info` version-negotiation handshake, binds identity
+from `auth`, and returns a ready client. Returns `ClientError::Connect` if the channel never comes
+up, if the handshake fails, or if the server is below the SDK's minimum supported version.
+
+### store
+
+```rust
+client.store(cell: CellInput) -> Result<String, ClientError>
+```
+
+Persists a cell and returns the server `node_id`. The SDK mints one idempotency key per logical call
+(`uuid4`) and replays it on a transport-error retry, so a retry returns the original `node_id` rather
+than a duplicate. `salience` is validated to `[0.0, 1.0]` before any RPC.
+
+### recall
+
+```rust
+client.recall(q: RecallQuery) -> Result<Vec<RecallHit>, ClientError>
+```
+
+Cache-first recall: scans the local inbox buffer first and falls back to the server only on a miss
+(or when short of `k`). When the cache and the server return the same content, the server copy wins.
+
+### start_session
+
+```rust
+client.start_session(agent_id: &str) -> Result<Session, ClientError>
+```
+
+Opens a session for the authenticated agent, starts the background gossip stream, and warms the
+scene cache. `agent_id` is your identity label; it is threaded as the session scope, never asserted
+as `source_agent`. Calling it again installs a fresh inbox channel for the new session generation.
+
+### place_beacon
+
+```rust
+client.place_beacon(interest: String) -> Result<String, ClientError>
+```
+
+Places a standing-interest beacon and returns its `node_id`. The owner is the session agent, never
+caller-asserted. Beacons shape what the mesh routes to you — see
+[positioning and beacons](/concepts/positioning-and-beacons).
+
+### inbox
+
+```rust
+client.inbox() -> impl Stream<Item = Result<InboxItem, ClientError>>
+```
+
+A live, reconnecting stream of gossip deliveries. Each `InboxItem` is yielded at most once (deduped
+by `diff_id`) across the live stream and any number of reconnect replays. It is single-consumer:
+`inbox()` takes the receiver for the current session generation. The stream never hangs — on a clean
+`close()` or a fatal error it ends, and a fatal error is yielded as the final `Err` item. Pin it
+(for example with `Box::pin`) and use `StreamExt::next` to drain it. See
+[gossip propagation](/concepts/gossip-propagation) for what flows down this stream.
+
+### close
+
+```rust
+client.close() -> ()
+```
+
+Aborts the background receive task, which ends any consumer parked in `inbox()`. Dropping the client
+does the same via its `Drop` impl, so explicit `close` is optional.
+
+### Types
+
+```rust
+pub struct CellInput {
+    pub cell_type: CellType,
+    pub content: String,
+    pub scene_id: Option<String>,
+    pub salience: f32, // CellInput::new defaults this to 0.5
+}
+
+pub struct RecallQuery {
+    pub text: String,
+    pub k: usize, // 0 ⇒ use ClientConfig::recall_default_k
+    pub cell_types: Option<Vec<CellType>>,
+    pub scene_id: Option<String>,
+    pub include_inbox: bool,
+}
+
+pub struct RecallHit {
+    pub node_id: String,
+    pub content: String,
+    pub cell_type: CellType,
+    pub score: f32,
+    pub from_cache: bool,
+}
+```
+
+`CellType` is an enum with the nine calibrated variants: `Decision`, `Constraint`, `Risk`,
+`Pattern`, `Lesson`, `Fact`, `Preference`, `Context`, `Task` (plus an `Unspecified` sentinel a newer
+server's unknown value decodes to). Tune buffer sizes, reconnect backoff, and the heartbeat timeout
+with `ClientConfig`.
+
+## Version negotiation
+
+<Note>
+At connect the SDK calls the unauthenticated `Info` RPC to learn the server's version and
+capabilities. If the server is below the SDK's minimum supported version, `connect` returns
+`ClientError::Connect` and no client. After connecting, read `client.server_version()` and gate
+optional, newer-than-floor features on `client.has_capability(token)` so the SDK degrades gracefully
+against an older server. See [API versioning](/operations/api-versioning) for the compatibility
+rules.
+</Note>

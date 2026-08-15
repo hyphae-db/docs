@@ -1,0 +1,59 @@
+---
+title: "A2A memory skills"
+description: "The four A2A skills — remember, recall, query, share — dispatched by a deterministic grammar over message:send, and what completes a share task."
+---
+
+The A2A surface exposes HyphaeDB's memory engine as four skills, all reached through the one
+canonical A2A method:
+
+```text
+POST /a2a/v1/message:send
+```
+
+| Skill | What it does | Returns |
+|-------|--------------|---------|
+| `remember` | Store a memory cell; the mesh gossips it to interested agents | A synchronous **Message** |
+| `recall` | Vector recall — the k most-similar cells to a query | A synchronous **Message** |
+| `query` | Structured query over the caller's read scope | A synchronous **Message** |
+| `share` | Store a memory and hand back a trackable **Task** for the durable commit | A **Task** |
+
+## Dispatch is a deterministic grammar — no LLM
+
+Skill selection is **deterministic**: the server reads the message's parts and picks the operation
+by a fixed grammar — there is no LLM and no inference anywhere in dispatch. The same input always
+selects the same skill; free text with no operation payload dispatches as a default recall. This
+keeps the surface predictable for a machine caller: an A2A client can rely on the mapping the way
+it would rely on a route table.
+
+## What the synchronous skills return
+
+`remember`, `recall`, and `query` complete inside the request and answer with an A2A **Message**.
+Recall and query results carry the node-view projection of each hit — the cell's content and
+metadata as HyphaeDB's other surfaces present them, encoded as A2A message parts.
+
+## `share` returns a Task — and what "completed" means
+
+`share` is the one skill that answers with a **Task**. Its lifecycle is
+`TASK_STATE_SUBMITTED → TASK_STATE_WORKING → TASK_STATE_COMPLETED` (or `TASK_STATE_FAILED`) — the
+states go on the wire as their ProtoJSON enum names — and the terminal transition has a precise
+meaning:
+
+**completion = durable commit, never propagation state.**
+
+The task reaches `TASK_STATE_COMPLETED` exactly when the store durably commits the memory. Gossip propagation
+is asynchronous by design — the diff fans out across the mesh on its own schedule, and the task
+state never tracks how far it has traveled or who has received it. A completed share tells you
+your memory is safely stored and released into the mesh, nothing more. To watch propagation itself,
+use the [Topology Observatory](/operations/topology-observatory).
+
+See [Tasks & streaming](/a2a/tasks-and-streaming) for reading, canceling, and subscribing to the
+task after `share` returns it.
+
+## Message caps
+
+Two caps bound every inbound message, with values from
+[the `a2a` config section](/operations/configuration#the-a2a-section):
+
+- `a2a.max_message_bytes` (default `262144`) — the request-body cap, enforced at the **transport,
+  before authentication**, so an oversized body is refused before the server buffers it.
+- `a2a.max_parts` (default `16`) — the maximum parts per message.
