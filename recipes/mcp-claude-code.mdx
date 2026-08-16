@@ -1,69 +1,158 @@
 ---
 title: "Recipe: connect HyphaeDB to Claude Code"
-description: Wire HyphaeDB in as an MCP server so Claude Code (or any MCP host) can store and recall memory as tool calls.
+description: One command wires Claude Code (or any MCP host) to gossip-backed agent memory — the launcher bootstraps the server and the identity itself.
 ---
 
-**Goal.** Give an MCP host — Claude Code, Cursor, Cline — HyphaeDB as agent memory, so the agent calls
-`store` / `recall` / `inbox` as tools instead of speaking gRPC.
+**Goal.** Give an MCP host — Claude Code, Codex, Cursor, OpenCode — HyphaeDB as agent memory, so
+the agent calls `store` / `recall` / `pull_inbox` as tools instead of speaking gRPC, with **zero
+manual auth steps**.
 
-**Prerequisites.**
-- A reachable PostgreSQL and the `hyphae-server` binary (or its container). See the
-  [quickstart](/quickstart) for `DATABASE_URL` and bootstrap.
-- An agent API key (`hyk_...`) — this is the agent's identity for every tool call in the session.
+## Install the plugin (recommended)
+
+From a HyphaeDB repo checkout, with Docker running:
+
+```bash
+claude plugin marketplace add /path/to/hyphaedb-checkout
+claude plugin install hyphaedb@hyphaedb
+```
+
+That's the whole setup. The plugin registers the `hyphae` MCP server and ships the
+`hyphae-memory` conventions skill. Its server entry runs the launcher:
+
+{/* hyphae-example: examples/mcp/.mcp.json */}
+```json
+{
+  "mcpServers": {
+    "hyphae": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/launcher/bin/hyphaedb-mcp.mjs"],
+      "env": { "HYPHAE_AGENT_NAME": "claude" }
+    }
+  }
+}
+```
 
 ## How it works
 
-In MCP-stdio mode the server is a **per-agent subprocess**: the MCP host launches it, they speak
-JSON-RPC 2.0 over stdin/stdout, and it binds no ports. Identity is fixed for the life of the process —
-the `HYPHAE_API_KEY` launch token is resolved once into an authenticated principal and reused for every
-`tools/call`, so there is no per-call identity argument to get wrong. See the
-[MCP tools overview](/mcp/overview).
+The launcher is a zero-dependency **stdio↔HTTP bridge**: it speaks MCP JSON-RPC on stdin/stdout
+to the host and forwards every frame verbatim to the server's `POST /mcp`. On startup it resolves
+a server — an explicit `HYPHAE_URL`, else a probe of localhost (`:8081` examples stack, `:8080`
+deploy stack), else it brings up the shared examples compose stack itself — and fixes that origin
+for the session.
 
-## Steps
+Identity needs no manual step either: the launcher derives a stable identity from your project
+directory and agent name, provisions it once over the Dev profile's `POST /v1/dev/provision`, and
+caches the credential at `~/.hyphae/launcher/` (0600). Warm starts reuse the cache; every session
+of the same project converges on one `dev:` agent per host.
 
-<Steps>
-  <Step title="Confirm the stdio mode runs">
-    The server enters MCP-stdio mode with the `mcp-stdio` subcommand (equivalently `--stdio` or
-    `HYPHAEDB_MCP_STDIO=1`). It needs `DATABASE_URL` and the launch token in its environment:
+## Use it
 
-    ```bash
-    DATABASE_URL="postgres://postgres:hyphae@localhost:5432/hyphae" \
-    HYPHAE_API_KEY="hyk_your_agent_key" \
-    hyphae-server mcp-stdio
-    ```
+Ask the agent to store a memory and recall it — the server stamps authorship from the
+authenticated key, never from tool arguments. Non-plugin hosts don't get the `hyphae-memory`
+skill, so paste the conventions prompt instead:
 
-    It reads JSON-RPC on stdin and writes on stdout — you won't see a prompt; that's expected.
-  </Step>
+{/* hyphae-example: examples/mcp/PROMPT.md */}
+```text
+You have HyphaeDB memory tools in this session. Follow these conventions:
 
-  <Step title="Register it with the MCP host">
-    Point the host at that command. For Claude Code, add an MCP server whose `command` is the binary in
-    `mcp-stdio` mode and whose `env` carries the two variables — for example in a project `.mcp.json`:
+1. Store durable decisions at high salience (store, salience 0.8 or higher):
+   architecture choices, settled disputes, breaking discoveries. Store routine
+   notes at low salience (0.2): rebase notes, transient status. Salience drives
+   propagation reach — a 0.2 memory travels nowhere, by design.
+2. Place beacons for your standing interests (place_beacon): the topics that
+   should be routed to you, such as security findings or API changes. Place
+   each interest once, not per session.
+3. Check your inbox at session start (pull_inbox): drain what the mesh routed
+   to you before starting work. The server owns the cursor; a repeat call never
+   replays acknowledged items.
+4. Recall before starting a work cycle (recall): query memory for prior
+   decisions on the task at hand before deciding anew.
 
-    ```json
-    {
-      "mcpServers": {
-        "hyphae": {
-          "command": "hyphae-server",
-          "args": ["mcp-stdio"],
-          "env": {
-            "DATABASE_URL": "postgres://postgres:hyphae@localhost:5432/hyphae",
-            "HYPHAE_API_KEY": "hyk_your_agent_key"
-          }
-        }
+Your identity is stamped server-side from your API key; there is no per-call
+identity argument.
+```
+
+## Launcher-direct (no plugin)
+
+Any MCP host can run the launcher without the plugin — register it as a stdio server:
+
+```bash
+claude mcp add hyphae --env HYPHAE_AGENT_NAME=claude -- node /path/to/hyphaedb-checkout/examples/mcp/launcher/bin/hyphaedb-mcp.mjs
+```
+
+or in a project `.mcp.json`:
+
+{/* hyphae-example: examples/mcp/hosts/claude-code.md#L25-L33 */}
+```json
+{
+  "mcpServers": {
+    "hyphae": {
+      "command": "node",
+      "args": ["/path/to/hyphaedb-checkout/examples/mcp/launcher/bin/hyphaedb-mcp.mjs"],
+      "env": { "HYPHAE_AGENT_NAME": "claude" }
+    }
+  }
+}
+```
+
+Per-host snippets (Codex, Cursor, OpenCode, n8n) live in the repo under `examples/mcp/hosts/`.
+
+## Remote / production servers
+
+Auto-provisioning exists only on Dev-profile servers. Against a remote or production server, set
+both overrides — an explicit URL and an explicit key:
+
+{/* hyphae-example: examples/mcp/hosts/claude-code.md#L43-L55 */}
+```json
+{
+  "mcpServers": {
+    "hyphae": {
+      "command": "node",
+      "args": ["/path/to/hyphaedb-checkout/examples/mcp/launcher/bin/hyphaedb-mcp.mjs"],
+      "env": {
+        "HYPHAE_AGENT_NAME": "claude",
+        "HYPHAE_URL": "https://hyphae.example.com",
+        "HYPHAE_API_KEY": "hyk_your_agent_key"
       }
     }
-    ```
+  }
+}
+```
 
-    Each agent that should have a distinct identity gets its **own** key in its own server entry — the
-    token is the identity.
-  </Step>
+## Manual fallback (from source / airgapped)
 
-  <Step title="Use it">
-    The host now sees HyphaeDB's [11 tools](/mcp/overview) (`store`, `recall`, `query`, `start_session`,
-    `place_beacon`, `inbox`, `pull_inbox`, and the rest). Ask the agent to store a memory and recall it;
-    the server stamps authorship from the launch token, never from the tool arguments.
-  </Step>
-</Steps>
+Without the launcher, the server binary itself speaks MCP over stdio: it is a **per-agent
+subprocess** that binds no ports, and identity is fixed for the life of the process — the
+`HYPHAE_API_KEY` launch token is resolved once into an authenticated principal and reused for
+every `tools/call`. It needs `DATABASE_URL` and the launch token in its environment:
+
+```bash
+DATABASE_URL="postgres://postgres:hyphae@localhost:5432/hyphae" \
+HYPHAE_API_KEY="hyk_your_agent_key" \
+hyphae-server mcp-stdio
+```
+
+It reads JSON-RPC on stdin and writes on stdout — you won't see a prompt; that's expected.
+Register it with the host:
+
+{/* hyphae-example: examples/mcp/hosts/claude-code.md#L67-L78 */}
+```json
+{
+  "mcpServers": {
+    "hyphae": {
+      "command": "hyphae-server",
+      "args": ["mcp-stdio"],
+      "env": {
+        "DATABASE_URL": "postgres://postgres:hyphae@localhost:5432/hyphae",
+        "HYPHAE_API_KEY": "hyk_your_agent_key"
+      }
+    }
+  }
+}
+```
+
+Each agent that should have a distinct identity gets its **own** key in its own server entry —
+the token is the identity.
 
 <Note>
 Over MCP, `recall` and `query` return `{node_id, distance}` pairs, **not** hydrated content — read a
@@ -74,5 +163,5 @@ tool responses small and id-based.
 ## See also
 
 - [MCP tools overview](/mcp/overview) — the 11 tools, transports, and the output envelope.
-- [Authorization](/operations/authorization) — how the launch token becomes an authenticated principal.
+- [Authorization](/operations/authorization) — how a key becomes an authenticated principal.
 - [Quickstart](/quickstart) — bringing the server and a key up from scratch.

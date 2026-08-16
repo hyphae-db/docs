@@ -22,6 +22,12 @@ Over HTTP, `POST /mcp` also enforces the `2025-06-18` requirement on the `MCP-Pr
 
 ### Connecting Claude Code over stdio
 
+#### The launcher (recommended)
+
+The `@hyphaedb/mcp` launcher is a zero-dependency stdio↔HTTP bridge that bootstraps everything itself — it finds or starts a server, auto-provisions a dev identity, and forwards MCP frames to `POST /mcp`. One registration command (or the Claude Code plugin) wires any MCP host; see the [Claude Code recipe](/recipes/mcp-claude-code) for install, per-host snippets, and the remote-server variant.
+
+#### The server binary directly (manual)
+
 Claude Code launches the server as a subprocess and talks to it over stdio. Point your MCP client at the HyphaeDB server binary and set `HYPHAE_API_KEY` in its environment. The token you provide is the agent's identity for every call made in that session — there is no per-call identity argument.
 
 ## The 11 tools
