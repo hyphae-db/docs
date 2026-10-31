@@ -22,11 +22,19 @@ the life of the process) versus **non-structural** (reloadable with `SIGHUP`).
 | `HYPHAEDB_MCP_STDIO` | No | unset | Set to `1` to run in MCP stdio mode (equivalent to `--stdio`). |
 | `HYPHAEDB_EMBEDDING_PROVIDER` | No | configured provider | `mock` (in-process dev/e2e), `tei` (sidecar), `openai`, `http`, or `candle` (local in-process — compiled into default builds; weights download at runtime). |
 | `HYPHAEDB_EMBEDDING_BASE_URL` | For `tei`/`http` | — | Endpoint root for the sidecar / OpenAI-compatible service (for example `http://tei:80`). Empty clears it. |
+| `HYPHAEDB_EMBEDDING_QUERY_PREFIX` | No | the model profile's | Overrides `embedding.query_prefix`, the instruction prefix prepended to query-side texts (recall/query text, beacon interests). Taken verbatim, trailing space included; an empty value forces no query prefix. |
+| `HYPHAEDB_EMBEDDING_DOCUMENT_PREFIX` | No | the model profile's | Overrides `embedding.document_prefix`, the prefix prepended to stored content. Same rules as the query prefix. |
 | `HYPHAEDB_TELEMETRY_MODE` | No | `otlp` | Telemetry backend: `prometheus` serves a `/metrics` scrape on the REST port, `otlp` exports traces to a collector (and still serves `/metrics` unless the scrape is disabled in the config file), `stdout`, or `none`. The compose stack defaults to `prometheus`. |
 | `HYPHAEDB_SNAPSHOT_DIR` | No | unset | Enables mesh snapshots: the server checkpoints the in-memory graph here every 15 minutes and at graceful shutdown, so a restart replays only the post-snapshot delta instead of scanning the whole corpus. Unset = snapshots disabled (full rehydration only — slower, never lossy). |
 | `HYPHAEDB_DEPLOYMENT_PROFILE` | No | `dev` | `dev` or `production`. |
 | `HYPHAEDB_HA_ENABLED` | For a 2-replica pair | `false` | Leased active-passive failover: the boot takes a PostgreSQL advisory-lock lease; the loser runs as a zero-write standby and promotes automatically. Must be set on BOTH instances before scaling past one replica. |
 | `RUST_LOG` | No | config log filter | Standard `EnvFilter` directive; overrides the config file's filter. |
+
+Embeddings are asymmetric: stored content is embedded document-side, while recall/query text and beacon
+interests are embedded query-side with the model's instruction prefix. For the default model (Snowflake
+Arctic Embed L v2.0) that prefix is `query: `, and documents get none. The two prefix keys are
+structural: set them in the config file's `embedding` section or with the env vars above. A model with no
+built-in profile and no override gets empty prefixes, and the server logs one warning at startup.
 
 Contradiction detection (see [the concept page](/concepts/contradiction-detection)) is configured
 through the config file's `contradiction` section rather than env vars: `enabled` (default
