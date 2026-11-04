@@ -25,15 +25,20 @@ Daemon mode is the deployable service. MCP stdio mode is for launching the serve
 
 ## Boot sequence
 
-On start, the daemon connects to PostgreSQL, runs migrations and verifies the dimension/model
-contract, builds the embedder, ensures a bootstrap admin exists, rehydrates the mesh from storage,
-and begins serving with graceful signal handling:
+On start, the daemon checks that PostgreSQL is reachable, builds the embedder, takes the HA lease
+(when enabled), connects to PostgreSQL — running migrations and verifying the database's embedding
+space against the engine's — ensures a bootstrap admin exists, rehydrates the mesh from storage, and
+begins serving with graceful signal handling:
 
 ```text
 HyphaeConfig::from_env_and_file
   → telemetry init + SIGHUP register  # reload signal is live before the slow boot steps
-  → PostgresStorage::connect          # migrations + dim/model/metric contract guard
-  → build_embedder                    # configured provider, probed the same way /readyz probes it
+  → DSN preflight                     # SELECT 1 within 5s: a bad DATABASE_URL fails before the model loads
+  → build_embedder                    # configured provider, probed the same way /readyz probes it;
+                                      #   logs the engine's embedding space
+  → dimension check                   # the engine's dimension must equal embedding.dimensions
+  → HA lease (when ha.enabled)        # nothing above writes to PostgreSQL
+  → PostgresStorage::connect          # migrations + the embedding-space guard
   → build_server                      # facade + gossip + security units + audit
   → readiness registry                # storage/embedding/audit/graph probes behind /readyz
   → ensure_bootstrap_admin            # fail-closed on an empty registry without the env
@@ -42,6 +47,27 @@ HyphaeConfig::from_env_and_file
   → recover_pending_deletes           # re-drives deletes interrupted by the last shutdown
   → serve (by mode)                   # graceful SIGTERM/SIGINT drain; periodic snapshots
 ```
+
+### The embedding-space guard
+
+A database records the embedding space it was created with: the model, its dimensions, the
+query/document instruction prefixes, the weights revision, and the engine's math epoch. Vectors from
+different spaces are not comparable, so a boot whose engine differs in any of these refuses to start
+with a message naming both spaces. The two remedies are to run the original embedding configuration
+again (the same `embedding.model_name`, `embedding.dimensions` and `hnsw.dimensions`, and prefixes),
+or to point `DATABASE_URL` at a new, empty database (existing memories are not carried over);
+re-embedding an existing corpus under a different model is not supported. A fresh database takes the
+engine's dimension, which must be between 1 and 2000 — wider models are not supported on V1
+PostgreSQL.
+
+<Warning>
+**Upgrading from v0.1.0 or an earlier version.** Databases created before this release recorded only
+the model, dimensions and metric — not the full embedding space — so this release refuses to boot
+against them. In the refusal message, a database line showing `revision= space_epoch=0` (an empty
+revision) means "recorded by an earlier version". Either keep running the previous version against
+that database (downgrading is safe: the migration that adds the new columns is additive), or point
+`DATABASE_URL` at a new, empty database.
+</Warning>
 
 ## Persistent volumes
 

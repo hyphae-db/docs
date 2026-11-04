@@ -74,11 +74,16 @@ yields the same certificate with zero additional removals.
 
 ## Re-embed migration
 
-Changing the embedding model puts the stored vectors in the wrong space, and the server fail-safes by
-refusing to load. The re-embed migration is the path forward: it streams every node, re-embeds it with
-the new model, re-links it in the graph, rewrites the stored model metadata, and rebuilds the snapshot.
-The resulting graph's recall matches a fresh build. V1 runs this offline (stop writes, re-embed, swap);
-an online dual-read cutover is a future enhancement.
+The re-embed job streams every node, re-embeds it with the engine built from the server's embedding configuration, re-links it
+in the graph, rewrites the stored embedding-space metadata, and rebuilds the snapshot. The resulting
+graph's recall matches a fresh build. V1 runs this offline (stop writes, re-embed, swap); an online
+dual-read cutover is a future enhancement.
+
+Changing the embedding model is not a re-embed: the database records the embedding space it was
+created with, and the server refuses to boot under a different one (see
+[the embedding-space guard](/operations/deployment#the-embedding-space-guard)). The remedies are
+running the original configuration again or starting from an empty database; re-embedding an
+existing corpus under a different model is not supported yet.
 
 ## Defaults
 

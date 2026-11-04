@@ -46,8 +46,11 @@ On boot the server rehydrates the mesh under a budget (120 seconds by default):
 
 <Steps>
   <Step title="Load the latest valid snapshot">
-    Validate the header (magic, format version, and the embedding model and dimensions), then verify
-    every frame's checksum. A model mismatch or a failed checksum rejects the snapshot.
+    Validate the header (magic, format version, and the embedding space — model, dimensions,
+    instruction prefixes, weights revision, engine epoch — plus the distance metric), then verify
+    every frame's checksum. A space mismatch, or a snapshot written in an older header format, is
+    stale rather than corrupt: it is skipped without counting as a corruption. A failed checksum
+    rejects the snapshot as corrupt.
   </Step>
   <Step title="Replay only the post-watermark delta">
     Re-insert just the rows at or after the snapshot's watermark — bounded by the snapshot

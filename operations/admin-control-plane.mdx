@@ -166,9 +166,9 @@ seatbelt — it must be typed to match the exact scope, so an erase cannot fire 
 
 **Reembed** is a long-running maintenance job, not a blocking call: the request returns a `job_id`
 immediately and at most **one reembed runs service-wide at a time** — a second request while one is
-`running` returns `409 Conflict`. The new embedding engine is selected server-side from
-`cfg.embedding` (the operator changes the configured model, then triggers a reembed to migrate the
-corpus), so the request carries no body. Poll `GET /admin/api/jobs/{id}` for
+`running` returns `409 Conflict`. The job re-embeds under the engine built from the server's embedding
+configuration, so the request carries no body. It is not a model-change tool: a database refuses to boot under a different
+embedding space (see [the embedding-space guard](/operations/deployment#the-embedding-space-guard)). Poll `GET /admin/api/jobs/{id}` for
 `{ status: "running", nodes_processed, nodes_total }` → `succeeded` or `failed`. Jobs are in-memory
 in V1: a crash loses the job record but not corpus consistency (the reembed commits its watermark
 last), and the operator simply re-triggers.
